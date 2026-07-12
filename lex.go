@@ -23,11 +23,23 @@ type Token struct {
 }
 
 var keywords = map[string]struct{}{
-	"global": {},
-	"if":     {},
-	"int":    {},
-	"return": {},
-	"void":   {},
+	"extern":  {},
+	"bool":    {},
+	"byte":    {},
+	"float32": {},
+	"float64": {},
+	"if":      {},
+	"int":     {},
+	"int8":    {},
+	"int16":   {},
+	"int32":   {},
+	"int64":   {},
+	"return":  {},
+	"uint8":   {},
+	"uint16":  {},
+	"uint32":  {},
+	"uint64":  {},
+	"void":    {},
 }
 
 func Tokenize(src string) ([]Token, error) {
@@ -61,12 +73,12 @@ func Tokenize(src string) ([]Token, error) {
 			}
 			tokens = append(tokens, Token{Kind: kind, Value: value, Line: line})
 		case unicode.IsDigit(char):
-			start := index
-			index++
-			for index < len(src) && unicode.IsDigit(rune(src[index])) {
-				index++
+			token, newIndex, err := tokenizeNumericLiteral(src, index, line)
+			if err != nil {
+				return nil, err
 			}
-			tokens = append(tokens, Token{Kind: TokNum, Value: src[start:index], Line: line})
+			tokens = append(tokens, token)
+			index = newIndex
 		case isOperator(char):
 			tokens = append(tokens, Token{Kind: TokOp, Value: string(char), Line: line})
 			index++
@@ -80,6 +92,35 @@ func Tokenize(src string) ([]Token, error) {
 
 	tokens = append(tokens, Token{Kind: TokEOF, Line: line})
 	return tokens, nil
+}
+
+func tokenizeNumericLiteral(src string, start int, line int) (Token, int, error) {
+	index := start
+	for index < len(src) && unicode.IsDigit(rune(src[index])) {
+		index++
+	}
+	if index < len(src) && src[index] == '.' {
+		index++
+		if index >= len(src) || !unicode.IsDigit(rune(src[index])) {
+			return Token{}, index, fmt.Errorf("lex error on line %d: invalid numeric literal", line)
+		}
+		for index < len(src) && unicode.IsDigit(rune(src[index])) {
+			index++
+		}
+	}
+	if index < len(src) && (src[index] == 'e' || src[index] == 'E') {
+		index++
+		if index < len(src) && (src[index] == '+' || src[index] == '-') {
+			index++
+		}
+		if index >= len(src) || !unicode.IsDigit(rune(src[index])) {
+			return Token{}, index, fmt.Errorf("lex error on line %d: invalid numeric literal", line)
+		}
+		for index < len(src) && unicode.IsDigit(rune(src[index])) {
+			index++
+		}
+	}
+	return Token{Kind: TokNum, Value: src[start:index], Line: line}, index, nil
 }
 
 func isIdentStart(char rune) bool {

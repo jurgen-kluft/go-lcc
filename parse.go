@@ -6,7 +6,7 @@ import (
 )
 
 type ProgramNode struct {
-	Globals   []*GlobalDeclNode
+	Decls     []*TopLevelDeclNode
 	Functions []*FunctionNode
 }
 
@@ -16,12 +16,13 @@ type Parameter struct {
 	Line int
 }
 
-type GlobalDeclNode struct {
+type TopLevelDeclNode struct {
 	Index  int
 	Name   string
 	Type   *Type
 	Params []Parameter
-	Kind   GlobalKind
+	Kind   DeclKind
+	Scope  ScopeKind
 	Line   int
 }
 
@@ -43,7 +44,7 @@ type ExprNode interface {
 
 type LvalueNode interface {
 	ExprNode
-	EmitAddress(code *[]byte, c *Compiler)
+	EmitAddress(code *CodeMemory, c *Compiler)
 }
 
 type BlockStmt struct {
@@ -74,8 +75,10 @@ type AssignStmt struct {
 }
 
 type NumberLiteral struct {
-	Value int
-	Line  int
+	IntValue   int
+	FloatValue float64
+	IsFloat    bool
+	Line       int
 }
 
 type IdentNode struct {
@@ -119,18 +122,22 @@ type parser struct {
 func (parser *parser) parseProgram() (*ProgramNode, error) {
 	program := &ProgramNode{}
 	for !parser.isEOF() {
-		if parser.peek().Kind == TokKeyword && parser.peek().Value == "global" {
-			decl, err := parser.parseGlobalDecl()
+		if parser.peek().Kind == TokKeyword && parser.peek().Value == "extern" {
+			decl, err := parser.parseExternDecl()
 			if err != nil {
 				return nil, err
 			}
-			program.Globals = append(program.Globals, decl)
+			program.Decls = append(program.Decls, decl)
 			continue
 		}
 
-		function, err := parser.parseFunction()
+		decl, function, err := parser.parseTopLevelDeclOrFunction()
 		if err != nil {
 			return nil, err
+		}
+		if decl != nil {
+			program.Decls = append(program.Decls, decl)
+			continue
 		}
 		program.Functions = append(program.Functions, function)
 	}
@@ -138,9 +145,9 @@ func (parser *parser) parseProgram() (*ProgramNode, error) {
 	return program, nil
 }
 
-func (parser *parser) parseGlobalDecl() (*GlobalDeclNode, error) {
+func (parser *parser) parseExternDecl() (*TopLevelDeclNode, error) {
 	line := parser.peek().Line
-	if _, err := parser.expectKeyword("global"); err != nil {
+	if _, err := parser.expectKeyword("extern"); err != nil {
 		return nil, err
 	}
 	if _, err := parser.expectDelimiter("("); err != nil {
@@ -156,7 +163,7 @@ func (parser *parser) parseGlobalDecl() (*GlobalDeclNode, error) {
 
 	index, err := strconv.Atoi(indexToken.Value)
 	if err != nil {
-		return nil, fmt.Errorf("syntax error on line %d: invalid global index %q", indexToken.Line, indexToken.Value)
+		return nil, fmt.Errorf("syntax error on line %d: invalid extern index %q", indexToken.Line, indexToken.Value)
 	}
 
 	typ, err := parser.parseType()
@@ -168,19 +175,19 @@ func (parser *parser) parseGlobalDecl() (*GlobalDeclNode, error) {
 		return nil, err
 	}
 
-	decl := &GlobalDeclNode{Index: index, Name: nameToken.Value, Type: typ, Line: line}
+	decl := &TopLevelDeclNode{Index: index, Name: nameToken.Value, Type: typ, Scope: ScopeExtern, Line: line}
 	if parser.matchDelimiter("(") {
 		params, err := parser.parseParameters()
 		if err != nil {
 			return nil, err
 		}
 		decl.Params = params
-		decl.Kind = GlobalFunction
+		decl.Kind = DeclFunction
 		if _, err := parser.expectDelimiter(")"); err != nil {
 			return nil, err
 		}
 	} else {
-		decl.Kind = GlobalVariable
+		decl.Kind = DeclVariable
 	}
 
 	if _, err := parser.expectDelimiter(";"); err != nil {
@@ -189,31 +196,45 @@ func (parser *parser) parseGlobalDecl() (*GlobalDeclNode, error) {
 	return decl, nil
 }
 
-func (parser *parser) parseFunction() (*FunctionNode, error) {
+func (parser *parser) parseTopLevelDeclOrFunction() (*TopLevelDeclNode, *FunctionNode, error) {
 	line := parser.peek().Line
 	returnType, err := parser.parseType()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	nameToken, err := parser.expect(TokIdent, "")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if _, err := parser.expectDelimiter("("); err != nil {
-		return nil, err
+	if parser.matchDelimiter("(") {
+		params, err := parser.parseParameters()
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, err := parser.expectDelimiter(")"); err != nil {
+			return nil, nil, err
+		}
+		body, err := parser.parseBlock()
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &FunctionNode{ReturnType: returnType, Name: nameToken.Value, Params: params, Body: body, Line: line}, nil
 	}
-	params, err := parser.parseParameters()
-	if err != nil {
-		return nil, err
+	if returnType.Kind == TypeVoid {
+		return nil, nil, fmt.Errorf("syntax error on line %d: internal variable %q cannot have type void", line, nameToken.Value)
 	}
-	if _, err := parser.expectDelimiter(")"); err != nil {
-		return nil, err
+	if _, err := parser.expectDelimiter(";"); err != nil {
+		return nil, nil, err
 	}
-	body, err := parser.parseBlock()
-	if err != nil {
-		return nil, err
+	decl := &TopLevelDeclNode{
+		Index: -1,
+		Name:  nameToken.Value,
+		Type:  returnType,
+		Kind:  DeclVariable,
+		Scope: ScopeBSS,
+		Line:  line,
 	}
-	return &FunctionNode{ReturnType: returnType, Name: nameToken.Value, Params: params, Body: body, Line: line}, nil
+	return decl, nil, nil
 }
 
 func (parser *parser) parseParameters() ([]Parameter, error) {
@@ -242,17 +263,14 @@ func (parser *parser) parseParameters() ([]Parameter, error) {
 
 func (parser *parser) parseType() (*Type, error) {
 	token := parser.peek()
-	if token.Kind != TokKeyword || (token.Value != "int" && token.Value != "void") {
+	if token.Kind != TokKeyword {
+		return nil, parser.errorf(token, "expected type")
+	}
+	typ := LookupNamedType(token.Value)
+	if typ == nil {
 		return nil, parser.errorf(token, "expected type")
 	}
 	parser.pos++
-
-	var typ *Type
-	if token.Value == "int" {
-		typ = IntType
-	} else {
-		typ = VoidType
-	}
 
 	for parser.peek().Kind == TokOp && parser.peek().Value == "*" {
 		parser.pos++
@@ -410,11 +428,18 @@ func (parser *parser) parsePrimary() (ExprNode, error) {
 	switch token.Kind {
 	case TokNum:
 		parser.pos++
+		if isFloatLiteral(token.Value) {
+			value, err := strconv.ParseFloat(token.Value, 64)
+			if err != nil {
+				return nil, fmt.Errorf("syntax error on line %d: invalid float literal %q", token.Line, token.Value)
+			}
+			return &NumberLiteral{FloatValue: value, IsFloat: true, Line: token.Line}, nil
+		}
 		value, err := strconv.Atoi(token.Value)
 		if err != nil {
 			return nil, fmt.Errorf("syntax error on line %d: invalid integer literal %q", token.Line, token.Value)
 		}
-		return &NumberLiteral{Value: value, Line: token.Line}, nil
+		return &NumberLiteral{IntValue: value, Line: token.Line}, nil
 	case TokIdent:
 		parser.pos++
 		if parser.matchDelimiter("(") {
@@ -444,6 +469,15 @@ func (parser *parser) parsePrimary() (ExprNode, error) {
 	default:
 		return nil, parser.errorf(token, "expected expression")
 	}
+}
+
+func isFloatLiteral(value string) bool {
+	for _, char := range value {
+		if char == '.' || char == 'e' || char == 'E' {
+			return true
+		}
+	}
+	return false
 }
 
 func (parser *parser) parseArguments() ([]ExprNode, error) {

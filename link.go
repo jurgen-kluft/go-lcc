@@ -11,7 +11,7 @@ func NewLinker(variableCapacity, functionCapacity int) *Linker {
 	return &Linker{VariableCapacity: variableCapacity, FunctionCapacity: functionCapacity}
 }
 
-func (linker *Linker) Link(program *ProgramNode, compiled *CompiledProgram) (*LinkedProgram, error) {
+func (linker *Linker) Link(program *ProgramNode, compiled *RelocatableProgram) (*LinkedProgram, error) {
 	if program == nil {
 		return nil, fmt.Errorf("link error: program is nil")
 	}
@@ -22,28 +22,55 @@ func (linker *Linker) Link(program *ProgramNode, compiled *CompiledProgram) (*Li
 		return nil, fmt.Errorf("link error: linker is nil")
 	}
 
-	for _, decl := range program.Globals {
-		switch decl.Kind {
-		case GlobalVariable:
-			if decl.Index < 0 || decl.Index >= linker.VariableCapacity {
-				return nil, fmt.Errorf("link error: global variable %q requests slot %d, but variable capacity is %d", decl.Name, decl.Index, linker.VariableCapacity)
-			}
-		case GlobalFunction:
-			if decl.Index < 0 || decl.Index >= linker.FunctionCapacity {
-				return nil, fmt.Errorf("link error: global function %q requests slot %d, but function capacity is %d", decl.Name, decl.Index, linker.FunctionCapacity)
-			}
-		default:
-			return nil, fmt.Errorf("link error: global contract %q has unknown kind %d", decl.Name, decl.Kind)
+	for _, binding := range compiled.ExternSymbols {
+		if binding.ByteOffset < 0 || binding.ByteOffset+binding.ByteSize > linker.VariableCapacity {
+			return nil, fmt.Errorf("link error: extern variable %q requests byte range [%d,%d), but extern memory capacity is %d", binding.Name, binding.ByteOffset, binding.ByteOffset+binding.ByteSize, linker.VariableCapacity)
+		}
+		if binding.ByteAlignment > 1 && binding.ByteOffset%binding.ByteAlignment != 0 {
+			return nil, fmt.Errorf("link error: extern variable %q byte offset %d is not aligned to %d", binding.Name, binding.ByteOffset, binding.ByteAlignment)
 		}
 	}
 
+	tempToAddress := make(map[int]int, len(compiled.Functions))
+	for _, binding := range compiled.Functions {
+		switch binding.Scope {
+		case ScopeExtern:
+			if binding.SlotIndex < 0 || binding.SlotIndex >= linker.FunctionCapacity {
+				return nil, fmt.Errorf("link error: host-linked function %q requests slot %d, but function capacity is %d", binding.Name, binding.SlotIndex, linker.FunctionCapacity)
+			}
+		case ScopeBSS:
+			tempToAddress[binding.TempFuncID] = binding.ScriptAddress
+		default:
+			return nil, fmt.Errorf("link error: function %q has invalid scope %d", binding.Name, binding.Scope)
+		}
+	}
+
+	linkedText := compiled.Text.Clone()
+	for _, patch := range compiled.CallPatches {
+		address, ok := tempToAddress[patch.TempFuncID]
+		if !ok {
+			return nil, fmt.Errorf("link error on line %d: unresolved function id %d", patch.Line, patch.TempFuncID)
+		}
+		linkedText.PatchInt(patch.OperandPos, address)
+	}
+
+	entryPoint, ok := tempToAddress[compiled.EntryFunction]
+	if !ok {
+		return nil, fmt.Errorf("link error: entry function id %d was not finalized", compiled.EntryFunction)
+	}
+
 	linked := &LinkedProgram{
-		Code:            append([]byte(nil), compiled.Code...),
-		Globals:         compiled.Globals,
-		GlobalVars:      append([]GlobalBinding(nil), compiled.GlobalVars...),
-		GlobalFunctions: append([]GlobalBinding(nil), compiled.GlobalFunctions...),
-		Entry:           compiled.Entry,
-		LocalSlotCount:  compiled.LocalSlotCount,
+		Text:          linkedText,
+		EntryPoint:    entryPoint,
+		FrameSize:     compiled.FrameSize,
+		FrameByteSize: compiled.FrameByteSize,
+		BSSSize:       compiled.BSSSize,
+		BSSByteSize:   compiled.BSSByteSize,
+		DebugSymbols: &DebugSymbols{
+			Symbols:       cloneBindingsMap(compiled.Symbols),
+			ExternSymbols: append([]SymbolBinding(nil), compiled.ExternSymbols...),
+			BSSSymbols:    append([]SymbolBinding(nil), compiled.BSSSymbols...),
+		},
 	}
 	return linked, nil
 }

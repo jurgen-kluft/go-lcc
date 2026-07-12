@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 
@@ -8,16 +9,24 @@ import (
 )
 
 func main() {
-	hostPlayerHealth := 45
+	externMemory := make([]byte, 8)
+	binary.LittleEndian.PutUint32(externMemory[4:], 45)
 	script := `
-global(0) void log_alert(int data);
-global(0) int player_health;
+extern(0) void log_alert(int data);
+extern(4) int player_health;
+int health_drop;
 
 void script_main() {
+	health_drop = 5;
 	if ((player_health - 40) + 1) {
 		log_alert(player_health);
-		player_health = player_health - 5;
+		reduce_health(health_drop);
 	}
+	return;
+}
+
+void reduce_health(int delta) {
+	player_health = player_health - delta;
 	return;
 }
 `
@@ -32,19 +41,26 @@ void script_main() {
 	compiled, err := compiler.Compile(program)
 	check(err)
 
-	linker := lcc.NewLinker(1, 1)
+	linker := lcc.NewLinker(len(externMemory), 1)
 	linked, err := linker.Link(program, compiled)
 	check(err)
 
-	vm := lcc.NewVM(1, linked.LocalSlotCount)
-	check(vm.BindGlobal(0, &hostPlayerHealth))
-	vm.RegisterFunction(0, func(vm *lcc.VM) error {
-		fmt.Printf("host log_alert(%d)\n", vm.Arg(0))
+	vm := lcc.NewVM(len(externMemory), linked.FrameByteSize)
+	vm.BindExternBlock(externMemory)
+	vm.RegisterExternDispatcher(func(vm *lcc.VM, importID int) error {
+		if importID != 0 {
+			return fmt.Errorf("unexpected extern import id %d", importID)
+		}
+		value, err := vm.PopInt32()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("host log_alert(%d)\n", value)
 		return nil
 	})
 
 	check(vm.Run(linked))
-	fmt.Printf("hostPlayerHealth=%d\n", hostPlayerHealth)
+	fmt.Printf("hostPlayerHealth=%d\n", int(int32(binary.LittleEndian.Uint32(externMemory[4:]))))
 }
 
 func check(err error) {
