@@ -3,6 +3,27 @@ package lcc
 import (
 	"fmt"
 	"math"
+	"sort"
+)
+
+type loopLabels struct {
+	breakTarget    int
+	continueTarget int
+}
+
+type controlFrame struct {
+	allowsContinue  bool
+	breakPatches    []int
+	continuePatches []int
+	continueTarget  int
+}
+
+type callGraphState int
+
+const (
+	callGraphUnvisited callGraphState = iota
+	callGraphVisiting
+	callGraphVisited
 )
 
 type Compiler struct {
@@ -23,11 +44,20 @@ type Compiler struct {
 	entryFunction         int
 	nextTempFuncID        int
 	callPatches           []CallPatch
+	controlStack          []controlFrame
 	err                   error
 }
 
 func NewCompiler() *Compiler {
-	return &Compiler{}
+	return &Compiler{
+		symbolBindings:        make(map[string]SymbolBinding),
+		functionBindingByTemp: make(map[int]int),
+		externSymbols:         make([]SymbolBinding, 256),
+		bssSymbols:            make([]SymbolBinding, 256),
+		functions:             make([]SymbolBinding, 256),
+		callPatches:           make([]CallPatch, 256),
+		controlStack:          make([]controlFrame, 32),
+	}
 }
 
 func cloneTypeSlice(types []*Type) []*Type {
@@ -67,8 +97,10 @@ func (compiler *Compiler) Compile(program *ProgramNode) (*RelocatableProgram, er
 		return nil, fmt.Errorf("compile error: no function definitions found")
 	}
 
+	// TODO is it possible to estimate how large the code memory will become?
+
 	compiler.program = program
-	compiler.code = compiler.code[:0]
+	compiler.code = make(CodeMemory, 0, 8192)
 	compiler.symbolBindings = make(map[string]SymbolBinding, len(program.Decls)+len(program.Functions))
 	compiler.externSymbols = compiler.externSymbols[:0]
 	compiler.bssSymbols = compiler.bssSymbols[:0]
@@ -84,6 +116,7 @@ func (compiler *Compiler) Compile(program *ProgramNode) (*RelocatableProgram, er
 	compiler.entryFunction = -1
 	compiler.nextTempFuncID = 0
 	compiler.callPatches = compiler.callPatches[:0]
+	compiler.controlStack = compiler.controlStack[:0]
 	compiler.err = nil
 
 	for _, decl := range program.Decls {
@@ -104,6 +137,9 @@ func (compiler *Compiler) Compile(program *ProgramNode) (*RelocatableProgram, er
 			return nil, compiler.err
 		}
 	}
+	if err := compiler.validateScriptCallGraph(); err != nil {
+		return nil, err
+	}
 
 	compiled := &RelocatableProgram{
 		Text:          compiler.code.Clone(),
@@ -119,6 +155,81 @@ func (compiler *Compiler) Compile(program *ProgramNode) (*RelocatableProgram, er
 		BSSByteSize:   compiler.bssByteSize,
 	}
 	return compiled, nil
+}
+
+func (compiler *Compiler) validateScriptCallGraph() error {
+	if compiler.entryFunction < 0 {
+		return fmt.Errorf("compile error: entry function not set")
+	}
+	functionByTemp := make(map[int]SymbolBinding, len(compiler.functions))
+	for _, binding := range compiler.functions {
+		functionByTemp[binding.TempFuncID] = binding
+	}
+	callGraph, err := compiler.buildScriptCallGraph(functionByTemp)
+	if err != nil {
+		return err
+	}
+	states := make(map[int]callGraphState, len(callGraph))
+	var visit func(tempFuncID int) error
+	visit = func(tempFuncID int) error {
+		switch states[tempFuncID] {
+		case callGraphVisited:
+			return nil
+		case callGraphVisiting:
+			binding := functionByTemp[tempFuncID]
+			return fmt.Errorf("compile error: recursive script call cycle detected at function %q", binding.Name)
+		}
+		if _, ok := functionByTemp[tempFuncID]; !ok {
+			return fmt.Errorf("compile error: unknown script function id %d", tempFuncID)
+		}
+		states[tempFuncID] = callGraphVisiting
+		for _, calleeID := range callGraph[tempFuncID] {
+			if err := visit(calleeID); err != nil {
+				return err
+			}
+		}
+		states[tempFuncID] = callGraphVisited
+		return nil
+	}
+	return visit(compiler.entryFunction)
+}
+
+func (compiler *Compiler) buildScriptCallGraph(functionByTemp map[int]SymbolBinding) (map[int][]int, error) {
+	ordered := make([]SymbolBinding, 0, len(compiler.functions))
+	for _, binding := range compiler.functions {
+		if binding.Scope == ScopeBSS {
+			ordered = append(ordered, binding)
+		}
+	}
+	sort.Slice(ordered, func(index int, other int) bool {
+		return ordered[index].ScriptAddress < ordered[other].ScriptAddress
+	})
+	callGraph := make(map[int][]int, len(ordered))
+	for _, binding := range ordered {
+		callGraph[binding.TempFuncID] = nil
+	}
+	for _, patch := range compiler.callPatches {
+		callerID := -1
+		for index, binding := range ordered {
+			start := binding.ScriptAddress
+			end := len(compiler.code)
+			if index+1 < len(ordered) {
+				end = ordered[index+1].ScriptAddress
+			}
+			if patch.OperandPos >= start && patch.OperandPos < end {
+				callerID = binding.TempFuncID
+				break
+			}
+		}
+		if callerID < 0 {
+			return nil, fmt.Errorf("compile error on line %d: unable to resolve caller for script call patch", patch.Line)
+		}
+		if _, ok := functionByTemp[patch.TempFuncID]; !ok {
+			return nil, fmt.Errorf("compile error on line %d: unknown callee id %d", patch.Line, patch.TempFuncID)
+		}
+		callGraph[callerID] = append(callGraph[callerID], patch.TempFuncID)
+	}
+	return callGraph, nil
 }
 
 func (compiler *Compiler) registerTopLevelDecl(decl *TopLevelDeclNode) {
@@ -194,7 +305,9 @@ func (compiler *Compiler) registerScriptFunction(function *FunctionNode) {
 	}
 	compiler.trackFunctionBinding(binding)
 	compiler.symbolBindings[function.Name] = binding
-	if compiler.entryFunction < 0 {
+	if function.Name == "script_main" {
+		compiler.entryFunction = binding.TempFuncID
+	} else if compiler.entryFunction < 0 {
 		compiler.entryFunction = binding.TempFuncID
 	}
 }
@@ -294,7 +407,10 @@ func (compiler *Compiler) exprType(expr ExprNode) *Type {
 	switch node := expr.(type) {
 	case *NumberLiteral:
 		if node.IsFloat {
-			return Float64Type
+			if node.FloatType != nil {
+				return node.FloatType
+			}
+			return Float32Type
 		}
 		return Int32Type
 	case *IdentNode:
@@ -307,6 +423,10 @@ func (compiler *Compiler) exprType(expr ExprNode) *Type {
 	case *BinaryExpr:
 		left := compiler.exprType(node.Left)
 		right := compiler.exprType(node.Right)
+		switch node.Op {
+		case "==", "!=", "<", ">", "<=", ">=":
+			return Int32Type
+		}
 		return promoteNumericType(left, right)
 	case *CallExpr:
 		if binding, ok := compiler.symbolBindings[node.Callee]; ok {
@@ -344,6 +464,10 @@ func (compiler *Compiler) compileExprAs(expr ExprNode, expected *Type) {
 		compiler.emitConvertIfNeeded(actualKind, kind)
 	case *BinaryExpr:
 		binaryType := expected
+		comparisonOp := isComparisonOperator(node.Op)
+		if comparisonOp {
+			binaryType = promoteNumericType(compiler.exprType(node.Left), compiler.exprType(node.Right))
+		}
 		if binaryType == nil {
 			binaryType = compiler.exprType(expr)
 		}
@@ -366,6 +490,9 @@ func (compiler *Compiler) compileExprAs(expr ExprNode, expected *Type) {
 			compiler.emitTyped(OpMul, binaryKind)
 		case "/":
 			compiler.emitTyped(OpDiv, binaryKind)
+		case "==", "!=", "<", ">", "<=", ">=":
+			compiler.emitComparison(node.Op, binaryKind)
+			compiler.emitConvertIfNeeded(KindInt32, kind)
 		default:
 			compiler.fail(fmt.Errorf("compile error on line %d: unsupported binary operator %q", node.Line, node.Op))
 		}
@@ -504,7 +631,53 @@ func (compiler *Compiler) compileStmt(stmt StmtNode) {
 		compiler.compileExprAs(node.Condition, Int32Type)
 		jumpPos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
 		compiler.compileStmt(node.Then)
+		if node.Else == nil {
+			compiler.patchOperand(jumpPos, len(compiler.code))
+			break
+		}
+		skipElsePos := compiler.emitOpWithOperand(OpJump, 0)
 		compiler.patchOperand(jumpPos, len(compiler.code))
+		compiler.compileStmt(node.Else)
+		compiler.patchOperand(skipElsePos, len(compiler.code))
+	case *WhileStmt:
+		loopStart := len(compiler.code)
+		compiler.compileExprAs(node.Condition, Int32Type)
+		exitPos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
+		compiler.controlStack = append(compiler.controlStack, controlFrame{allowsContinue: true, continueTarget: loopStart})
+		compiler.compileStmt(node.Body)
+		compiler.patchCurrentContinues(loopStart)
+		compiler.emitOpWithOperand(OpJump, loopStart)
+		loopEnd := len(compiler.code)
+		compiler.patchOperand(exitPos, loopEnd)
+		compiler.patchCurrentBreaks(loopEnd)
+		compiler.controlStack = compiler.controlStack[:len(compiler.controlStack)-1]
+	case *ForStmt:
+		if node.Init != nil {
+			compiler.compileStmt(node.Init)
+		}
+		loopStart := len(compiler.code)
+		exitPos := -1
+		if node.Condition != nil {
+			compiler.compileExprAs(node.Condition, Int32Type)
+			exitPos = compiler.emitOpWithOperand(OpJumpIfFalse, 0)
+		}
+		compiler.controlStack = append(compiler.controlStack, controlFrame{allowsContinue: true, continueTarget: -1})
+		compiler.compileStmt(node.Body)
+		postStart := len(compiler.code)
+		compiler.controlStack[len(compiler.controlStack)-1].continueTarget = postStart
+		compiler.patchCurrentContinues(postStart)
+		if node.Post != nil {
+			compiler.compileStmt(node.Post)
+		}
+		compiler.emitOpWithOperand(OpJump, loopStart)
+		loopEnd := len(compiler.code)
+		if exitPos >= 0 {
+			compiler.patchOperand(exitPos, loopEnd)
+		}
+		compiler.patchCurrentBreaks(loopEnd)
+		compiler.controlStack = compiler.controlStack[:len(compiler.controlStack)-1]
+	case *SwitchStmt:
+		compiler.compileSwitchStmt(node)
 	case *ReturnStmt:
 		if node.Value != nil {
 			compiler.compileExprAs(node.Value, compiler.currentReturnType)
@@ -528,8 +701,131 @@ func (compiler *Compiler) compileStmt(stmt StmtNode) {
 			assignKind = KindInt32
 		}
 		compiler.emitTyped(OpAssign, assignKind)
+	case *BreakStmt:
+		if len(compiler.controlStack) == 0 {
+			compiler.fail(fmt.Errorf("compile error on line %d: break used outside loop or switch", node.Line))
+			return
+		}
+		patchPos := compiler.emitOpWithOperand(OpJump, 0)
+		frame := &compiler.controlStack[len(compiler.controlStack)-1]
+		frame.breakPatches = append(frame.breakPatches, patchPos)
+	case *ContinueStmt:
+		controlIndex := compiler.findContinueControlIndex()
+		if controlIndex < 0 {
+			compiler.fail(fmt.Errorf("compile error on line %d: continue used outside loop", node.Line))
+			return
+		}
+		patchPos := compiler.emitOpWithOperand(OpJump, 0)
+		frame := &compiler.controlStack[controlIndex]
+		frame.continuePatches = append(frame.continuePatches, patchPos)
 	default:
 		compiler.fail(fmt.Errorf("compile error: unsupported statement type %T", stmt))
+	}
+}
+
+func isComparisonOperator(op string) bool {
+	switch op {
+	case "==", "!=", "<", ">", "<=", ">=":
+		return true
+	default:
+		return false
+	}
+}
+
+var comparisonOperators = map[string]Opcode{
+	"==": OpEqual,
+	"!=": OpNotEqual,
+	"<":  OpLess,
+	"<=": OpLessEqual,
+	">":  OpGreater,
+	">=": OpGreaterEqual,
+}
+
+func (compiler *Compiler) emitComparison(op string, kind ValueKind) {
+	if opcode, ok := comparisonOperators[op]; ok {
+		compiler.emitTyped(opcode, kind)
+	} else {
+		compiler.fail(fmt.Errorf("compile error: comparison operator %q not yet fully supported", op))
+	}
+
+}
+func (compiler *Compiler) compileSwitchStmt(node *SwitchStmt) {
+	if node == nil {
+		return
+	}
+	compiler.controlStack = append(compiler.controlStack, controlFrame{})
+	switchType := compiler.exprType(node.Value)
+	if switchType == nil {
+		switchType = Int32Type
+	}
+	compareFailPatches := make([]int, 0, len(node.Cases))
+	caseEntryPatches := make([]int, 0, len(node.Cases))
+	for _, switchCase := range node.Cases {
+		compareStart := len(compiler.code)
+		for _, patchPos := range compareFailPatches {
+			compiler.patchOperand(patchPos, compareStart)
+		}
+		compareFailPatches = compareFailPatches[:0]
+		caseType := promoteNumericType(switchType, compiler.exprType(switchCase.Value))
+		if caseType == nil {
+			caseType = switchType
+		}
+		caseKind := valueKindFromType(caseType)
+		if caseKind == KindNone {
+			caseType = Int32Type
+			caseKind = KindInt32
+		}
+		compiler.compileExprAs(node.Value, caseType)
+		compiler.compileExprAs(switchCase.Value, caseType)
+		compiler.emitComparison("==", caseKind)
+		compareFailPatches = append(compareFailPatches, compiler.emitOpWithOperand(OpJumpIfFalse, 0))
+		caseEntryPatches = append(caseEntryPatches, compiler.emitOpWithOperand(OpJump, 0))
+	}
+	defaultJumpPos := compiler.emitOpWithOperand(OpJump, 0)
+	for index, switchCase := range node.Cases {
+		bodyStart := len(compiler.code)
+		compiler.patchOperand(caseEntryPatches[index], bodyStart)
+		for _, stmt := range switchCase.Body {
+			compiler.compileStmt(stmt)
+		}
+	}
+	defaultStart := len(compiler.code)
+	compiler.patchOperand(defaultJumpPos, defaultStart)
+	for _, patchPos := range compareFailPatches {
+		compiler.patchOperand(patchPos, defaultStart)
+	}
+	for _, stmt := range node.Default {
+		compiler.compileStmt(stmt)
+	}
+	endPos := len(compiler.code)
+	compiler.patchCurrentBreaks(endPos)
+	compiler.controlStack = compiler.controlStack[:len(compiler.controlStack)-1]
+}
+
+func (compiler *Compiler) findContinueControlIndex() int {
+	for index := len(compiler.controlStack) - 1; index >= 0; index-- {
+		if compiler.controlStack[index].allowsContinue {
+			return index
+		}
+	}
+	return -1
+}
+
+func (compiler *Compiler) patchCurrentBreaks(target int) {
+	if len(compiler.controlStack) == 0 {
+		return
+	}
+	for _, patchPos := range compiler.controlStack[len(compiler.controlStack)-1].breakPatches {
+		compiler.patchOperand(patchPos, target)
+	}
+}
+
+func (compiler *Compiler) patchCurrentContinues(target int) {
+	if len(compiler.controlStack) == 0 {
+		return
+	}
+	for _, patchPos := range compiler.controlStack[len(compiler.controlStack)-1].continuePatches {
+		compiler.patchOperand(patchPos, target)
 	}
 }
 

@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-type TypeKind int
+type TypeKind uint8
 
 const (
 	TypeInvalid TypeKind = iota
@@ -42,7 +42,7 @@ func (typ *Type) Alignment() int {
 	if typ.Kind == TypePointer {
 		return 4
 	}
-	if typ.Size <= 0 {
+	if typ.Size <= 1 {
 		return 1
 	}
 	if typ.Size >= 8 {
@@ -134,40 +134,24 @@ func PointerTo(base *Type) *Type {
 	return &Type{Kind: TypePointer, Name: base.Name + "*", Size: 1, Base: base}
 }
 
+var typeToValueKind = map[TypeKind]ValueKind{
+	TypeVoid: KindVoid,
+	TypeBool: KindBool,
+	TypeByte: KindByte,
+	TypeInt8: KindInt8, TypeInt16: KindInt16, TypeInt32: KindInt32, TypeInt64: KindInt64,
+	TypeUint8: KindUint8, TypeUint16: KindUint16, TypeUint32: KindUint32, TypeUint64: KindUint64,
+	TypeFloat32: KindFloat32, TypeFloat64: KindFloat64,
+	TypePointer: KindAddress,
+}
+
 func valueKindFromType(typ *Type) ValueKind {
 	if typ == nil {
 		return KindNone
 	}
-	switch typ.Kind {
-	case TypeBool:
-		return KindBool
-	case TypeByte:
-		return KindByte
-	case TypeInt8:
-		return KindInt8
-	case TypeInt16:
-		return KindInt16
-	case TypeInt32:
-		return KindInt32
-	case TypeInt64:
-		return KindInt64
-	case TypeUint8:
-		return KindUint8
-	case TypeUint16:
-		return KindUint16
-	case TypeUint32:
-		return KindUint32
-	case TypeUint64:
-		return KindUint64
-	case TypeFloat32:
-		return KindFloat32
-	case TypeFloat64:
-		return KindFloat64
-	case TypePointer:
-		return KindAddress
-	default:
-		return KindNone
+	if kind, ok := typeToValueKind[typ.Kind]; ok {
+		return kind
 	}
+	return KindNone
 }
 
 type Opcode byte
@@ -185,7 +169,14 @@ const (
 	OpOffset
 	OpDereference
 	OpAssign
+	OpEqual
+	OpNotEqual
+	OpLess
+	OpLessEqual
+	OpGreater
+	OpGreaterEqual
 	OpJumpIfFalse
+	OpJump
 	OpCall
 	OpCallExtern
 	OpRet
@@ -195,6 +186,7 @@ type ValueKind byte
 
 const (
 	KindNone ValueKind = iota
+	KindVoid
 	KindBool
 	KindByte
 	KindInt8
@@ -208,7 +200,22 @@ const (
 	KindFloat32
 	KindFloat64
 	KindAddress
+	KindCount
 )
+
+var valueKindSize = [KindCount]int{
+	KindNone: 0, KindVoid: 0,
+	KindBool: 1, KindByte: 1,
+	KindInt8: 1, KindInt16: 2, KindInt32: 4, KindInt64: 8,
+	KindUint8: 1, KindUint16: 2, KindUint32: 4, KindUint64: 8,
+	KindFloat32: 4, KindFloat64: 8,
+	KindAddress: 4, // Assuming a 32-bit address space
+}
+
+func (kind ValueKind) Size() int {
+	size := valueKindSize[kind]
+	return size
+}
 
 type InstructionMode byte
 
@@ -257,35 +264,6 @@ const (
 	ScopeBSS
 	ScopeExtern
 )
-
-type Address int
-
-func makeAddress(segment memorySegment, index int) Address {
-	return Address(int(segment)<<24 | (index & 0x00ffffff))
-}
-
-func (address Address) Segment() memorySegment {
-	return memorySegment((int(address) >> 24) & 0xff)
-}
-
-func (address Address) Index() int {
-	return int(address) & 0x00ffffff
-}
-
-func (kind ValueKind) Size() int {
-	switch kind {
-	case KindBool, KindByte, KindInt8, KindUint8:
-		return 1
-	case KindInt16, KindUint16:
-		return 2
-	case KindInt32, KindUint32, KindFloat32, KindAddress:
-		return 4
-	case KindInt64, KindUint64, KindFloat64:
-		return 8
-	default:
-		return 0
-	}
-}
 
 type ExternDispatcher func(vm *VM, importID int) error
 

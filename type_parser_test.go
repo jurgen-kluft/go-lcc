@@ -90,4 +90,107 @@ float64 script_main() {
 	if lit.FloatValue != 1000 {
 		t.Fatalf("expected float value 1000, got %v", lit.FloatValue)
 	}
+	if lit.FloatType != Float32Type {
+		t.Fatalf("expected unsuffixed scientific notation literal to default to float32, got %v", lit.FloatType)
+	}
+}
+
+func TestParseFloatLiteralSuffixes(t *testing.T) {
+	script := `
+float64 script_main() {
+	0.5;
+	1.5f;
+	2.5d;
+	return 3e1D;
+}
+`
+
+	tokens, err := Tokenize(script)
+	if err != nil {
+		t.Fatalf("Tokenize failed: %v", err)
+	}
+	program, err := Parse(tokens)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	statements := program.Functions[0].Body.Statements
+	checks := []struct {
+		index int
+		want  *Type
+		value float64
+	}{
+		{index: 0, want: Float32Type, value: 0.5},
+		{index: 1, want: Float32Type, value: 1.5},
+		{index: 2, want: Float64Type, value: 2.5},
+		{index: 3, want: Float64Type, value: 30},
+	}
+	for _, check := range checks {
+		var expr ExprNode
+		switch node := statements[check.index].(type) {
+		case *ExprStmt:
+			expr = node.Expr
+		case *ReturnStmt:
+			expr = node.Value
+		default:
+			t.Fatalf("expected numeric expression statement, got %T", statements[check.index])
+		}
+		lit, ok := expr.(*NumberLiteral)
+		if !ok {
+			t.Fatalf("expected numeric literal at statement %d, got %T", check.index, expr)
+		}
+		if !lit.IsFloat {
+			t.Fatalf("expected float literal at statement %d", check.index)
+		}
+		if lit.FloatType != check.want {
+			t.Fatalf("expected float type %v at statement %d, got %v", check.want, check.index, lit.FloatType)
+		}
+		if lit.FloatValue != check.value {
+			t.Fatalf("expected float value %v at statement %d, got %v", check.value, check.index, lit.FloatValue)
+		}
+	}
+}
+
+func TestParseControlFlowStatements(t *testing.T) {
+	script := `
+int counter;
+
+void script_main() {
+	while (counter < 10) {
+		counter = counter + 1;
+	}
+	for (counter = 0; counter < 4; counter = counter + 1) {
+		switch (counter) {
+		case 1:
+			break;
+		default:
+			continue;
+		}
+	}
+	return;
+}
+`
+
+	tokens, err := Tokenize(script)
+	if err != nil {
+		t.Fatalf("Tokenize failed: %v", err)
+	}
+	program, err := Parse(tokens)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	statements := program.Functions[0].Body.Statements
+	if _, ok := statements[0].(*WhileStmt); !ok {
+		t.Fatalf("expected first statement to be while, got %T", statements[0])
+	}
+	forStmt, ok := statements[1].(*ForStmt)
+	if !ok {
+		t.Fatalf("expected second statement to be for, got %T", statements[1])
+	}
+	body, ok := forStmt.Body.(*BlockStmt)
+	if !ok {
+		t.Fatalf("expected for body block, got %T", forStmt.Body)
+	}
+	if _, ok := body.Statements[0].(*SwitchStmt); !ok {
+		t.Fatalf("expected switch statement inside for body, got %T", body.Statements[0])
+	}
 }

@@ -5,34 +5,53 @@ import (
 	"fmt"
 )
 
+type Address int
+
+func makeAddress(segment memorySegment, index int) Address {
+	return Address(int(segment)<<24 | (index & 0x00ffffff))
+}
+
+func (address Address) Segment() memorySegment {
+	return memorySegment((int(address) >> 24) & 0xff)
+}
+
+func (address Address) Index() int {
+	return int(address) & 0x00ffffff
+}
+
 type memorySegment byte
 
 const (
-	segmentInvalid memorySegment = iota
-	segmentFrame
-	segmentBSS
-	segmentExtern
+	segmentInvalid   memorySegment = 0
+	segmentFrame     memorySegment = 1
+	segmentBSS       memorySegment = 2
+	segmentExtern    memorySegment = 3
+	segmentStack     memorySegment = 4
+	segmentReserved0 memorySegment = 5
+	segmentReserved1 memorySegment = 6
+	segmentReserved2 memorySegment = 7
+	segmentCount     memorySegment = 8
 )
 
+var segmentNames = [segmentCount]string{
+	segmentInvalid:   "invalid",
+	segmentFrame:     "frame",
+	segmentBSS:       "bss",
+	segmentExtern:    "extern",
+	segmentStack:     "stack",
+	segmentReserved0: "reserved",
+	segmentReserved1: "reserved",
+	segmentReserved2: "reserved",
+}
+
 func (segment memorySegment) String() string {
-	switch segment {
-	case segmentFrame:
-		return "frame"
-	case segmentBSS:
-		return "bss"
-	case segmentExtern:
-		return "extern"
-	default:
-		return "invalid"
-	}
+	return segmentNames[segment&(segmentCount-1)]
 }
 
 type MemorySegment []byte
 
 func NewMemorySegment(size int, capacity int) MemorySegment {
-	if capacity < size {
-		capacity = size
-	}
+	capacity = max(capacity, size)
 	return make([]byte, size, capacity)
 }
 

@@ -45,7 +45,7 @@ void reduce_health(int delta) {
 	linked, err := linker.Link(program, compiled)
 	check(err)
 
-	vm := lcc.NewVM(len(externMemory), linked.FrameByteSize)
+	vm := lcc.NewVM(256)
 	vm.BindExternBlock(externMemory)
 	vm.RegisterExternDispatcher(func(vm *lcc.VM, importID int) error {
 		if importID != 0 {

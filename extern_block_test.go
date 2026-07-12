@@ -19,7 +19,7 @@ void script_main() {
 `
 
 	linked := mustLinkProgram(t, script, len(externMemory), 0)
-	vm := NewVM(len(externMemory), linked.FrameByteSize)
+	vm := NewVM(testFrameCapacityBytes)
 	vm.BindExternBlock(externMemory)
 	if err := vm.Run(linked); err != nil {
 		t.Fatalf("Run failed: %v", err)

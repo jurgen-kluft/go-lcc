@@ -3,8 +3,11 @@ package lcc
 import (
 	"encoding/binary"
 	"math"
+	"strings"
 	"testing"
 )
+
+const testFrameCapacityBytes = 256
 
 func TestCompileInternalGlobalUsesAddressPipeline(t *testing.T) {
 	script := `
@@ -67,7 +70,7 @@ void reduce_health(int delta) {
 `
 
 	linked := mustLinkProgram(t, script, len(externMemory), 1)
-	vm := NewVM(len(externMemory), linked.FrameByteSize)
+	vm := NewVM(testFrameCapacityBytes)
 	vm.BindExternBlock(externMemory)
 	vm.RegisterExternDispatcher(func(vm *VM, importID int) error {
 		if importID != 0 {
@@ -105,7 +108,7 @@ void script_main() {
 `
 
 	linked := mustLinkProgram(t, script, 0, 1)
-	vm := NewVM(0, linked.FrameByteSize)
+	vm := NewVM(testFrameCapacityBytes)
 	vm.RegisterExternDispatcher(func(vm *VM, importID int) error {
 		if importID != 0 {
 			t.Fatalf("expected import id 0, got %d", importID)
@@ -161,7 +164,7 @@ int64 bump(int64 amount) {
 `
 
 	linked := mustLinkProgram(t, script, len(externMemory), 0)
-	vm := NewVM(len(externMemory), linked.FrameByteSize)
+	vm := NewVM(testFrameCapacityBytes)
 	vm.BindExternBlock(externMemory)
 	if err := vm.Run(linked); err != nil {
 		t.Fatalf("Run failed: %v", err)
@@ -195,7 +198,7 @@ void script_main() {
 
 	var seen uint64
 	linked := mustLinkProgram(t, script, len(externMemory), 2)
-	vm := NewVM(len(externMemory), linked.FrameByteSize)
+	vm := NewVM(testFrameCapacityBytes)
 	vm.BindExternBlock(externMemory)
 	vm.RegisterExternDispatcher(func(vm *VM, importID int) error {
 		value, err := vm.PopUint64()
@@ -224,7 +227,7 @@ void script_main() {
 	}
 }
 
-func TestRunPreservesLastResultBitsAndKind(t *testing.T) {
+func TestRunLeavesFinalReturnOnStack(t *testing.T) {
 	externMemory := make([]byte, 8)
 	binary.LittleEndian.PutUint64(externMemory[0:], uint64(1)<<63)
 	script := `
@@ -236,21 +239,18 @@ uint64 script_main() {
 `
 
 	linked := mustLinkProgram(t, script, len(externMemory), 0)
-	vm := NewVM(len(externMemory), linked.FrameByteSize)
+	vm := NewVM(testFrameCapacityBytes)
 	vm.BindExternBlock(externMemory)
 	if err := vm.Run(linked); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if vm.LastResultKind != KindUint64 {
-		t.Fatalf("expected last result kind uint64, got %v", vm.LastResultKind)
-	}
-	if vm.LastResultBits != uint64(1)<<63 {
-		t.Fatalf("expected last result bits 0x%x, got 0x%x", uint64(1)<<63, vm.LastResultBits)
+	if got, err := vm.PopUint64(); err != nil || got != uint64(1)<<63 {
+		t.Fatalf("expected uint64 return 0x%x, got 0x%x err=%v", uint64(1)<<63, got, err)
 	}
 }
 
 func TestVMTypedStackHelpersPreserveBits(t *testing.T) {
-	vm := NewVM(0, 0)
+	vm := NewVM(8)
 	if err := vm.PushFloat32(3.5); err != nil {
 		t.Fatalf("PushFloat32 failed: %v", err)
 	}
@@ -288,15 +288,12 @@ func TestRunSupportsFloat64Arithmetic(t *testing.T) {
 	code.AppendInstruction(makeInstruction(OpRet, KindNone, ModeNone, FlagNone))
 	program := &LinkedProgram{Text: code, EntryPoint: entryPoint}
 
-	vm := NewVM(0, 0)
+	vm := NewVM(8)
 	if err := vm.Run(program); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if vm.LastResultKind != KindFloat64 {
-		t.Fatalf("expected last result kind float64, got %v", vm.LastResultKind)
-	}
-	if got := math.Float64frombits(vm.LastResultBits); got != 3.75 {
-		t.Fatalf("expected float64 result 3.75, got %v", got)
+	if got, err := vm.PopFloat64(); err != nil || got != 3.75 {
+		t.Fatalf("expected float64 result 3.75, got %v err=%v", got, err)
 	}
 }
 
@@ -308,15 +305,63 @@ float64 script_main() {
 `
 
 	linked := mustLinkProgram(t, script, 0, 0)
-	vm := NewVM(0, linked.FrameByteSize)
+	vm := NewVM(testFrameCapacityBytes)
 	if err := vm.Run(linked); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if vm.LastResultKind != KindFloat64 {
-		t.Fatalf("expected float64 result kind, got %v", vm.LastResultKind)
+	if got, err := vm.PopFloat64(); err != nil || got != 3.75 {
+		t.Fatalf("expected compiled float64 result 3.75, got %v err=%v", got, err)
 	}
-	if got := math.Float64frombits(vm.LastResultBits); got != 3.75 {
-		t.Fatalf("expected compiled float64 result 3.75, got %v", got)
+}
+
+func TestCompileAndRunDefaultFloatLiteralAsFloat32(t *testing.T) {
+	script := `
+float32 script_main() {
+	return 0.5 + 0.25;
+}
+`
+
+	linked := mustLinkProgram(t, script, 0, 0)
+	vm := NewVM(testFrameCapacityBytes)
+	if err := vm.Run(linked); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if got, err := vm.PopFloat32(); err != nil || got != 0.75 {
+		t.Fatalf("expected compiled float32 result 0.75, got %v err=%v", got, err)
+	}
+}
+
+func TestCompileAndRunExplicitFloat64LiteralSuffix(t *testing.T) {
+	script := `
+float64 script_main() {
+	return 0.5d + 0.25d;
+}
+`
+
+	linked := mustLinkProgram(t, script, 0, 0)
+	vm := NewVM(testFrameCapacityBytes)
+	if err := vm.Run(linked); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if got, err := vm.PopFloat64(); err != nil || got != 0.75 {
+		t.Fatalf("expected compiled float64 result 0.75, got %v err=%v", got, err)
+	}
+}
+
+func TestCompileAndRunFloatLiteralSuffixPromotion(t *testing.T) {
+	script := `
+float64 script_main() {
+	return 1.0f + 2.5d;
+}
+`
+
+	linked := mustLinkProgram(t, script, 0, 0)
+	vm := NewVM(testFrameCapacityBytes)
+	if err := vm.Run(linked); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if got, err := vm.PopFloat64(); err != nil || got != 3.5 {
+		t.Fatalf("expected promoted float64 result 3.5, got %v err=%v", got, err)
 	}
 }
 
@@ -331,15 +376,85 @@ float64 script_main() {
 `
 
 	linked := mustLinkProgram(t, script, 0, 0)
-	vm := NewVM(0, linked.FrameByteSize)
+	vm := NewVM(testFrameCapacityBytes)
 	if err := vm.Run(linked); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if vm.LastResultKind != KindFloat64 {
-		t.Fatalf("expected float64 result kind, got %v", vm.LastResultKind)
+	if got, err := vm.PopFloat64(); err != nil || got != 3.5 {
+		t.Fatalf("expected mixed result 3.5, got %v err=%v", got, err)
 	}
-	if got := math.Float64frombits(vm.LastResultBits); got != 3.5 {
-		t.Fatalf("expected mixed result 3.5, got %v", got)
+}
+
+func TestRunNestedCallsWithExplicitFrameCapacity(t *testing.T) {
+	script := `
+int64 level3(int64 value, int64 extra) {
+	return value + extra;
+}
+
+int64 level2(int64 left, int64 right) {
+	return level3(left + right, right);
+}
+
+int64 script_main() {
+	return level2(2, 2);
+}
+`
+
+	linked := mustLinkProgram(t, script, 0, 0)
+	vm := NewVM(testFrameCapacityBytes)
+	if err := vm.Run(linked); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if got, err := vm.PopInt64(); err != nil || got != 6 {
+		t.Fatalf("expected nested call result 6, got %d err=%v", got, err)
+	}
+}
+
+func TestCompileRejectsRecursiveScriptCallCycle(t *testing.T) {
+	script := `
+int recurse(int value) {
+	return recurse(value);
+}
+
+int script_main() {
+	return recurse(1);
+}
+`
+
+	tokens, err := Tokenize(script)
+	if err != nil {
+		t.Fatalf("Tokenize failed: %v", err)
+	}
+	program, err := Parse(tokens)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if _, err := NewCompiler().Compile(program); err == nil {
+		t.Fatal("expected compile to reject recursive script call cycle")
+	}
+}
+
+func TestRunFailsWhenFrameCapacityTooSmall(t *testing.T) {
+	script := `
+int64 level3(int64 value, int64 extra) {
+	return value + extra;
+}
+
+int64 level2(int64 left, int64 right) {
+	return level3(left + right, right);
+}
+
+int64 script_main() {
+	return level2(2, 2);
+}
+`
+
+	linked := mustLinkProgram(t, script, 0, 0)
+	vm := NewVM(linked.FrameByteSize)
+	if err := vm.Run(linked); err == nil {
+		t.Fatal("expected runtime failure for insufficient frame capacity")
+	} else if !strings.Contains(err.Error(), "frame capacity exceeded") {
+		t.Fatalf("expected frame capacity error, got %v", err)
 	}
 }
 
@@ -358,15 +473,12 @@ func TestRunPreservesNestedUint64ReturnBits(t *testing.T) {
 
 	program := &LinkedProgram{Text: code, EntryPoint: entryPoint}
 
-	vm := NewVM(0, 0)
+	vm := NewVM(8)
 	if err := vm.Run(program); err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if vm.LastResultKind != KindUint64 {
-		t.Fatalf("expected last result kind uint64, got %v", vm.LastResultKind)
-	}
-	if vm.LastResultBits != uint64(1)<<63 {
-		t.Fatalf("expected nested uint64 result bits 0x%x, got 0x%x", uint64(1)<<63, vm.LastResultBits)
+	if got, err := vm.PopUint64(); err != nil || got != uint64(1)<<63 {
+		t.Fatalf("expected nested uint64 result 0x%x, got 0x%x err=%v", uint64(1)<<63, got, err)
 	}
 }
 
@@ -377,9 +489,168 @@ func TestOpCallErrorsOnOutOfRangeCodeAddress(t *testing.T) {
 	code.AppendInt(99)
 	code.AppendInstruction(makeInstruction(OpRet, KindNone, ModeNone, FlagNone))
 	program := &LinkedProgram{Text: code, EntryPoint: entryPoint}
-	vm := NewVM(0, 0)
+	vm := NewVM(8)
 	if err := vm.Run(program); err == nil {
 		t.Fatal("expected error for out-of-range code address")
+	}
+}
+
+func TestRunSupportsWhileAndElse(t *testing.T) {
+	script := `
+int counter;
+int total;
+
+void script_main() {
+	counter = 0;
+	total = 0;
+	while (counter < 5) {
+		if (counter == 3) {
+			total = total + 10;
+		} else {
+			total = total + 1;
+		}
+		counter = counter + 1;
+	}
+	return;
+}
+`
+
+	linked := mustLinkProgram(t, script, 0, 0)
+	vm := NewVM(testFrameCapacityBytes)
+	if err := vm.Run(linked); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	counterOffset := linked.DebugSymbols.Symbols["counter"].ByteOffset
+	totalOffset := linked.DebugSymbols.Symbols["total"].ByteOffset
+	counterBits := binary.LittleEndian.Uint32(vm.Memory.segment[segmentBSS][counterOffset : counterOffset+4])
+	totalBits := binary.LittleEndian.Uint32(vm.Memory.segment[segmentBSS][totalOffset : totalOffset+4])
+	if int32(counterBits) != 5 {
+		t.Fatalf("expected counter 5, got %d", int32(counterBits))
+	}
+	if int32(totalBits) != 14 {
+		t.Fatalf("expected total 14, got %d", int32(totalBits))
+	}
+}
+
+func TestRunSupportsForContinueBreakAndSwitch(t *testing.T) {
+	script := `
+int counter;
+int total;
+
+void script_main() {
+	total = 0;
+	for (counter = 0; counter < 6; counter = counter + 1) {
+		switch (counter) {
+		case 1:
+		case 2:
+			total = total + 20;
+			break;
+		case 4:
+			break;
+		default:
+			if (counter == 3) {
+				continue;
+			}
+			total = total + counter;
+		}
+		if (counter >= 4) {
+			break;
+		}
+	}
+	return;
+}
+`
+
+	linked := mustLinkProgram(t, script, 0, 0)
+	vm := NewVM(testFrameCapacityBytes)
+	if err := vm.Run(linked); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	counterOffset := linked.DebugSymbols.Symbols["counter"].ByteOffset
+	totalOffset := linked.DebugSymbols.Symbols["total"].ByteOffset
+	counterBits := binary.LittleEndian.Uint32(vm.Memory.segment[segmentBSS][counterOffset : counterOffset+4])
+	totalBits := binary.LittleEndian.Uint32(vm.Memory.segment[segmentBSS][totalOffset : totalOffset+4])
+	if int32(counterBits) != 4 {
+		t.Fatalf("expected counter 4 after break, got %d", int32(counterBits))
+	}
+	if int32(totalBits) != 40 {
+		t.Fatalf("expected total 40, got %d", int32(totalBits))
+	}
+}
+
+func TestRunSupportsSwitchWithMixedNumericKinds(t *testing.T) {
+	script := `
+int whole;
+float32 fraction;
+int total;
+
+void script_main() {
+	whole = 2;
+	fraction = 3.0f;
+	total = 0;
+
+	switch (whole) {
+	case 1.0d:
+		total = 10;
+		break;
+	case 2.0d:
+		total = 20;
+		break;
+	default:
+		total = 30;
+	}
+
+	switch (fraction) {
+	case 2:
+		total = total + 100;
+		break;
+	case 3:
+		total = total + 3;
+		break;
+	default:
+		total = total + 1000;
+	}
+	return;
+}
+`
+
+	linked := mustLinkProgram(t, script, 0, 0)
+	vm := NewVM(testFrameCapacityBytes)
+	if err := vm.Run(linked); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	totalOffset := linked.DebugSymbols.Symbols["total"].ByteOffset
+	totalBits := binary.LittleEndian.Uint32(vm.Memory.segment[segmentBSS][totalOffset : totalOffset+4])
+	if int32(totalBits) != 23 {
+		t.Fatalf("expected total 23, got %d", int32(totalBits))
+	}
+}
+
+func TestRunSupportsSwitchDefaultOnly(t *testing.T) {
+	script := `
+int code;
+int total;
+
+void script_main() {
+	code = 7;
+	total = 1;
+	switch (code) {
+	default:
+		total = total + 9;
+	}
+	return;
+}
+`
+
+	linked := mustLinkProgram(t, script, 0, 0)
+	vm := NewVM(testFrameCapacityBytes)
+	if err := vm.Run(linked); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	totalOffset := linked.DebugSymbols.Symbols["total"].ByteOffset
+	totalBits := binary.LittleEndian.Uint32(vm.Memory.segment[segmentBSS][totalOffset : totalOffset+4])
+	if int32(totalBits) != 10 {
+		t.Fatalf("expected total 10, got %d", int32(totalBits))
 	}
 }
 

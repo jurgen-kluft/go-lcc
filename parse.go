@@ -55,7 +55,43 @@ type BlockStmt struct {
 type IfStmt struct {
 	Condition ExprNode
 	Then      StmtNode
+	Else      StmtNode
 	Line      int
+}
+
+type WhileStmt struct {
+	Condition ExprNode
+	Body      StmtNode
+	Line      int
+}
+
+type ForStmt struct {
+	Init      StmtNode
+	Condition ExprNode
+	Post      StmtNode
+	Body      StmtNode
+	Line      int
+}
+
+type SwitchCase struct {
+	Value ExprNode
+	Body  []StmtNode
+	Line  int
+}
+
+type SwitchStmt struct {
+	Value   ExprNode
+	Cases   []SwitchCase
+	Default []StmtNode
+	Line      int
+}
+
+type BreakStmt struct {
+	Line int
+}
+
+type ContinueStmt struct {
+	Line int
 }
 
 type ReturnStmt struct {
@@ -78,6 +114,7 @@ type NumberLiteral struct {
 	IntValue   int
 	FloatValue float64
 	IsFloat    bool
+	FloatType  *Type
 	Line       int
 }
 
@@ -101,9 +138,14 @@ type CallExpr struct {
 
 func (*BlockStmt) stmtNode()     {}
 func (*IfStmt) stmtNode()        {}
+func (*WhileStmt) stmtNode()     {}
+func (*ForStmt) stmtNode()       {}
+func (*SwitchStmt) stmtNode()    {}
 func (*ReturnStmt) stmtNode()    {}
 func (*ExprStmt) stmtNode()      {}
 func (*AssignStmt) stmtNode()    {}
+func (*BreakStmt) stmtNode()     {}
+func (*ContinueStmt) stmtNode()  {}
 func (*NumberLiteral) exprNode() {}
 func (*IdentNode) exprNode()     {}
 func (*BinaryExpr) exprNode()    {}
@@ -312,8 +354,31 @@ func (parser *parser) parseStatement() (StmtNode, error) {
 	if token.Kind == TokKeyword && token.Value == "if" {
 		return parser.parseIfStmt()
 	}
+	if token.Kind == TokKeyword && token.Value == "while" {
+		return parser.parseWhileStmt()
+	}
+	if token.Kind == TokKeyword && token.Value == "for" {
+		return parser.parseForStmt()
+	}
+	if token.Kind == TokKeyword && token.Value == "switch" {
+		return parser.parseSwitchStmt()
+	}
 	if token.Kind == TokKeyword && token.Value == "return" {
 		return parser.parseReturnStmt()
+	}
+	if token.Kind == TokKeyword && token.Value == "break" {
+		parser.pos++
+		if _, err := parser.expectDelimiter(";"); err != nil {
+			return nil, err
+		}
+		return &BreakStmt{Line: token.Line}, nil
+	}
+	if token.Kind == TokKeyword && token.Value == "continue" {
+		parser.pos++
+		if _, err := parser.expectDelimiter(";"); err != nil {
+			return nil, err
+		}
+		return &ContinueStmt{Line: token.Line}, nil
 	}
 
 	line := token.Line
@@ -360,7 +425,185 @@ func (parser *parser) parseIfStmt() (StmtNode, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &IfStmt{Condition: condition, Then: thenStmt, Line: line}, nil
+	var elseStmt StmtNode
+	if parser.peek().Kind == TokKeyword && parser.peek().Value == "else" {
+		parser.pos++
+		elseStmt, err = parser.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &IfStmt{Condition: condition, Then: thenStmt, Else: elseStmt, Line: line}, nil
+}
+
+func (parser *parser) parseWhileStmt() (StmtNode, error) {
+	line := parser.peek().Line
+	if _, err := parser.expectKeyword("while"); err != nil {
+		return nil, err
+	}
+	if _, err := parser.expectDelimiter("("); err != nil {
+		return nil, err
+	}
+	condition, err := parser.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := parser.expectDelimiter(")"); err != nil {
+		return nil, err
+	}
+	body, err := parser.parseStatement()
+	if err != nil {
+		return nil, err
+	}
+	return &WhileStmt{Condition: condition, Body: body, Line: line}, nil
+}
+
+func (parser *parser) parseForStmt() (StmtNode, error) {
+	line := parser.peek().Line
+	if _, err := parser.expectKeyword("for"); err != nil {
+		return nil, err
+	}
+	if _, err := parser.expectDelimiter("("); err != nil {
+		return nil, err
+	}
+	var init StmtNode
+	if !(parser.peek().Kind == TokDelimiter && parser.peek().Value == ";") {
+		stmt, err := parser.parseForClauseStatement()
+		if err != nil {
+			return nil, err
+		}
+		init = stmt
+	}
+	if _, err := parser.expectDelimiter(";"); err != nil {
+		return nil, err
+	}
+	var condition ExprNode
+	if !(parser.peek().Kind == TokDelimiter && parser.peek().Value == ";") {
+		expr, err := parser.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+		condition = expr
+	}
+	if _, err := parser.expectDelimiter(";"); err != nil {
+		return nil, err
+	}
+	var post StmtNode
+	if !(parser.peek().Kind == TokDelimiter && parser.peek().Value == ")") {
+		stmt, err := parser.parseForClauseStatement()
+		if err != nil {
+			return nil, err
+		}
+		post = stmt
+	}
+	if _, err := parser.expectDelimiter(")"); err != nil {
+		return nil, err
+	}
+	body, err := parser.parseStatement()
+	if err != nil {
+		return nil, err
+	}
+	return &ForStmt{Init: init, Condition: condition, Post: post, Body: body, Line: line}, nil
+}
+
+func (parser *parser) parseSwitchStmt() (StmtNode, error) {
+	line := parser.peek().Line
+	if _, err := parser.expectKeyword("switch"); err != nil {
+		return nil, err
+	}
+	if _, err := parser.expectDelimiter("("); err != nil {
+		return nil, err
+	}
+	value, err := parser.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := parser.expectDelimiter(")"); err != nil {
+		return nil, err
+	}
+	if _, err := parser.expectDelimiter("{"); err != nil {
+		return nil, err
+	}
+	stmt := &SwitchStmt{Value: value, Line: line}
+	for !(parser.peek().Kind == TokDelimiter && parser.peek().Value == "}") {
+		if parser.isEOF() {
+			return nil, parser.errorf(parser.peek(), "expected closing brace")
+		}
+		keyword := parser.peek()
+		if keyword.Kind == TokKeyword && keyword.Value == "case" {
+			parser.pos++
+			caseValue, err := parser.parseExpression()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := parser.expectDelimiter(":"); err != nil {
+				return nil, err
+			}
+			caseBody, err := parser.parseSwitchClauseBody()
+			if err != nil {
+				return nil, err
+			}
+			stmt.Cases = append(stmt.Cases, SwitchCase{Value: caseValue, Body: caseBody, Line: keyword.Line})
+			continue
+		}
+		if keyword.Kind == TokKeyword && keyword.Value == "default" {
+			parser.pos++
+			if _, err := parser.expectDelimiter(":"); err != nil {
+				return nil, err
+			}
+			defaultBody, err := parser.parseSwitchClauseBody()
+			if err != nil {
+				return nil, err
+			}
+			stmt.Default = defaultBody
+			continue
+		}
+		return nil, parser.errorf(keyword, "expected case or default")
+	}
+	if _, err := parser.expectDelimiter("}"); err != nil {
+		return nil, err
+	}
+	return stmt, nil
+}
+
+func (parser *parser) parseSwitchClauseBody() ([]StmtNode, error) {
+	body := make([]StmtNode, 0, 4)
+	for {
+		token := parser.peek()
+		if token.Kind == TokDelimiter && token.Value == "}" {
+			break
+		}
+		if token.Kind == TokKeyword && (token.Value == "case" || token.Value == "default") {
+			break
+		}
+		stmt, err := parser.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+		body = append(body, stmt)
+	}
+	return body, nil
+}
+
+func (parser *parser) parseForClauseStatement() (StmtNode, error) {
+	token := parser.peek()
+	line := token.Line
+	expr, err := parser.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+	if parser.matchOperator("=") {
+		target, ok := expr.(LvalueNode)
+		if !ok {
+			return nil, parser.errorf(token, "assignment target is not assignable")
+		}
+		value, err := parser.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+		return &AssignStmt{Target: target, Value: value, Line: line}, nil
+	}
+	return &ExprStmt{Expr: expr, Line: line}, nil
 }
 
 func (parser *parser) parseReturnStmt() (StmtNode, error) {
@@ -382,7 +625,41 @@ func (parser *parser) parseReturnStmt() (StmtNode, error) {
 }
 
 func (parser *parser) parseExpression() (ExprNode, error) {
-	return parser.parseAdditive()
+	return parser.parseEquality()
+}
+
+func (parser *parser) parseEquality() (ExprNode, error) {
+	left, err := parser.parseRelational()
+	if err != nil {
+		return nil, err
+	}
+	for parser.peek().Kind == TokOp && (parser.peek().Value == "==" || parser.peek().Value == "!=") {
+		op := parser.peek()
+		parser.pos++
+		right, err := parser.parseRelational()
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryExpr{Op: op.Value, Left: left, Right: right, Line: op.Line}
+	}
+	return left, nil
+}
+
+func (parser *parser) parseRelational() (ExprNode, error) {
+	left, err := parser.parseAdditive()
+	if err != nil {
+		return nil, err
+	}
+	for parser.peek().Kind == TokOp && (parser.peek().Value == "<" || parser.peek().Value == ">" || parser.peek().Value == "<=" || parser.peek().Value == ">=") {
+		op := parser.peek()
+		parser.pos++
+		right, err := parser.parseAdditive()
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryExpr{Op: op.Value, Left: left, Right: right, Line: op.Line}
+	}
+	return left, nil
 }
 
 func (parser *parser) parseAdditive() (ExprNode, error) {
@@ -429,11 +706,12 @@ func (parser *parser) parsePrimary() (ExprNode, error) {
 	case TokNum:
 		parser.pos++
 		if isFloatLiteral(token.Value) {
-			value, err := strconv.ParseFloat(token.Value, 64)
+			literalValue, floatType := parseFloatLiteralSpec(token.Value)
+			value, err := strconv.ParseFloat(literalValue, 64)
 			if err != nil {
 				return nil, fmt.Errorf("syntax error on line %d: invalid float literal %q", token.Line, token.Value)
 			}
-			return &NumberLiteral{FloatValue: value, IsFloat: true, Line: token.Line}, nil
+			return &NumberLiteral{FloatValue: value, IsFloat: true, FloatType: floatType, Line: token.Line}, nil
 		}
 		value, err := strconv.Atoi(token.Value)
 		if err != nil {
@@ -477,7 +755,26 @@ func isFloatLiteral(value string) bool {
 			return true
 		}
 	}
-	return false
+	if len(value) == 0 {
+		return false
+	}
+	suffix := value[len(value)-1]
+	return suffix == 'f' || suffix == 'F' || suffix == 'd' || suffix == 'D'
+}
+
+func parseFloatLiteralSpec(value string) (string, *Type) {
+	if len(value) == 0 {
+		return value, Float32Type
+	}
+	suffix := value[len(value)-1]
+	switch suffix {
+	case 'f', 'F':
+		return value[:len(value)-1], Float32Type
+	case 'd', 'D':
+		return value[:len(value)-1], Float64Type
+	default:
+		return value, Float32Type
+	}
 }
 
 func (parser *parser) parseArguments() ([]ExprNode, error) {

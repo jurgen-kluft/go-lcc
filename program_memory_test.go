@@ -11,7 +11,7 @@ func TestProgramMemoryRoutesByAddressSegment(t *testing.T) {
 	if err := memory.WriteBits(makeAddress(segmentBSS, 1), KindByte, 22); err != nil {
 		t.Fatalf("WriteBits bss failed: %v", err)
 	}
-	memory.Frame = append(memory.Frame, 0, 0, 0, 0)
+	memory.segment[segmentFrame] = append(memory.segment[segmentFrame], 0, 0, 0, 0)
 	if err := memory.WriteBits(makeAddress(segmentFrame, 2), KindByte, 33); err != nil {
 		t.Fatalf("WriteBits frame failed: %v", err)
 	}
@@ -24,6 +24,17 @@ func TestProgramMemoryRoutesByAddressSegment(t *testing.T) {
 	}
 	if bits, err := memory.ReadBits(makeAddress(segmentFrame, 2), KindByte); err != nil || bits != 33 {
 		t.Fatalf("expected frame byte 33, got %d, err=%v", bits, err)
+	}
+}
+
+func TestVMAllocateExternMemoryCreatesOwnedExternSegment(t *testing.T) {
+	vm := NewVM(8)
+	vm.AllocateExternMemory(16)
+	if len(vm.Memory.segment[segmentExtern]) != 16 {
+		t.Fatalf("expected owned extern memory size 16, got %d", len(vm.Memory.segment[segmentExtern]))
+	}
+	if err := vm.Memory.WriteBits(makeAddress(segmentExtern, 4), KindInt32, uint64(uint32(99))); err != nil {
+		t.Fatalf("expected write into allocated extern memory to succeed: %v", err)
 	}
 }
 
