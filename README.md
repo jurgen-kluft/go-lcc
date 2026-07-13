@@ -8,21 +8,27 @@ The language is designed for small host-integrated scripts that work with primit
 
 - Primitive types: `bool`, `byte`, `int`/`int32`, `int8`, `int16`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`, `float32`, `float64`
 - Top-level globals
+- Local variables inside function blocks
 - Script functions with typed parameters and returns
 - `extern(offset)` variables backed by host memory
 - `extern(slot)` functions dispatched by the host
-- Expressions using `+`, `-`, `*`, `/`, `==`, `!=`, `<`, `<=`, `>`, `>=`
+- String literals passed as pointer values
+- Expressions using `true`, `false`, `+`, `-`, `*`, `/`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`
 - Control flow: `if`, `if/else`, `while`, `for`, `switch`, `break`, `continue`, `return`
 
 ## Current Limits
 
-- No local variable declarations inside functions
-- No strings, arrays, structs, or field access
+- No local declarations in `for` initializers
+- Standalone expression statements must be function calls
+- No arrays, structs, or field access
 - No unary operators such as `-x`, `!x`, `*ptr`, or `&x`
-- No logical operators such as `&&` or `||`
 - No bitwise operators or modulo
-- Pointer types exist in the type system but are not yet practical at source level
+- Pointer types can be declared in signatures and declarations, but source-level pointer operators are not implemented
 - Recursive script call cycles are rejected at compile time
+
+String literals are stored in a CONST segment as NUL-terminated byte strings. Zero-initialized globals remain in BSS, while initialized writable globals are placed in DATA.
+
+Booleans use numeric truthiness at runtime: `false` is `0`, and any non-zero value is true. Logical operators short-circuit and produce normalized `0` or `1` results.
 
 ## Example
 

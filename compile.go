@@ -32,19 +32,27 @@ type Compiler struct {
 	symbolBindings        map[string]SymbolBinding
 	externSymbols         []SymbolBinding
 	bssSymbols            []SymbolBinding
+	dataSymbols           []SymbolBinding
+	constSymbols          []SymbolBinding
 	functions             []SymbolBinding
 	functionBindingByTemp map[int]int
 	localSlots            map[string]int
 	localTypes            map[string]*Type
 	currentReturnType     *Type
+	currentFrameByteSize  int
 	localSlotCount        int
 	maxLocalSlots         int
 	maxFrameByteSize      int
 	bssByteSize           int
+	dataByteSize          int
 	entryFunction         int
 	nextTempFuncID        int
 	callPatches           []CallPatch
 	controlStack          []controlFrame
+	localScopeStack       []map[string]struct{}
+	constImage            []byte
+	dataImage             []byte
+	stringLiteralOffsets  map[string]int
 	err                   error
 }
 
@@ -54,9 +62,12 @@ func NewCompiler() *Compiler {
 		functionBindingByTemp: make(map[int]int),
 		externSymbols:         make([]SymbolBinding, 256),
 		bssSymbols:            make([]SymbolBinding, 256),
+		dataSymbols:           make([]SymbolBinding, 256),
+		constSymbols:          make([]SymbolBinding, 0, 16),
 		functions:             make([]SymbolBinding, 256),
 		callPatches:           make([]CallPatch, 256),
 		controlStack:          make([]controlFrame, 32),
+		localScopeStack:       make([]map[string]struct{}, 0, 16),
 	}
 }
 
@@ -65,6 +76,28 @@ func cloneTypeSlice(types []*Type) []*Type {
 		return nil
 	}
 	return append([]*Type(nil), types...)
+}
+
+func cloneIntMap(values map[string]int) map[string]int {
+	if len(values) == 0 {
+		return nil
+	}
+	clone := make(map[string]int, len(values))
+	for name, value := range values {
+		clone[name] = value
+	}
+	return clone
+}
+
+func cloneTypeMap(values map[string]*Type) map[string]*Type {
+	if len(values) == 0 {
+		return nil
+	}
+	clone := make(map[string]*Type, len(values))
+	for name, value := range values {
+		clone[name] = value
+	}
+	return clone
 }
 
 func parameterTypes(params []Parameter) []*Type {
@@ -104,23 +137,44 @@ func (compiler *Compiler) Compile(program *ProgramNode) (*RelocatableProgram, er
 	compiler.symbolBindings = make(map[string]SymbolBinding, len(program.Decls)+len(program.Functions))
 	compiler.externSymbols = compiler.externSymbols[:0]
 	compiler.bssSymbols = compiler.bssSymbols[:0]
+	compiler.dataSymbols = compiler.dataSymbols[:0]
+	compiler.constSymbols = compiler.constSymbols[:0]
 	compiler.functions = compiler.functions[:0]
 	compiler.functionBindingByTemp = make(map[int]int, len(program.Functions))
 	compiler.localSlots = nil
 	compiler.localTypes = nil
 	compiler.currentReturnType = nil
+	compiler.currentFrameByteSize = 0
 	compiler.localSlotCount = 0
 	compiler.maxLocalSlots = 0
 	compiler.maxFrameByteSize = 0
 	compiler.bssByteSize = 0
+	compiler.dataByteSize = 0
 	compiler.entryFunction = -1
 	compiler.nextTempFuncID = 0
 	compiler.callPatches = compiler.callPatches[:0]
 	compiler.controlStack = compiler.controlStack[:0]
+	compiler.localScopeStack = compiler.localScopeStack[:0]
+	compiler.constImage = compiler.constImage[:0]
+	compiler.dataImage = compiler.dataImage[:0]
+	compiler.stringLiteralOffsets = make(map[string]int)
 	compiler.err = nil
 
 	for _, decl := range program.Decls {
 		compiler.registerTopLevelDecl(decl)
+		if compiler.err != nil {
+			return nil, compiler.err
+		}
+	}
+	for _, decl := range program.Decls {
+		if decl == nil || decl.Initializer == nil {
+			continue
+		}
+		binding, ok := compiler.symbolBindings[decl.Name]
+		if !ok {
+			return nil, fmt.Errorf("compile error on line %d: unknown top-level declaration %q", decl.Line, decl.Name)
+		}
+		compiler.initializeGlobal(binding, decl.Initializer, decl.Line)
 		if compiler.err != nil {
 			return nil, compiler.err
 		}
@@ -141,14 +195,36 @@ func (compiler *Compiler) Compile(program *ProgramNode) (*RelocatableProgram, er
 		return nil, err
 	}
 
+	programSymbols := NewProgramSymbols()
+	programSymbols.ExternSymbols = append(programSymbols.ExternSymbols, compiler.externSymbols...)
+	programSymbols.BSSSymbols = append(programSymbols.BSSSymbols, compiler.bssSymbols...)
+	programSymbols.DataSymbols = append(programSymbols.DataSymbols, compiler.dataSymbols...)
+	programSymbols.ConstSymbols = append(programSymbols.ConstSymbols, compiler.constSymbols...)
+	for _, binding := range compiler.externSymbols {
+		programSymbols.Symbols[binding.Name] = binding
+	}
+	for _, binding := range compiler.bssSymbols {
+		programSymbols.Symbols[binding.Name] = binding
+	}
+	for _, binding := range compiler.dataSymbols {
+		programSymbols.Symbols[binding.Name] = binding
+	}
+	for _, binding := range compiler.constSymbols {
+		programSymbols.Symbols[binding.Name] = binding
+	}
+
 	compiled := &RelocatableProgram{
 		Text:           compiler.code.Clone(),
-		ProgramSymbols: NewProgramSymbols(),
+		ProgramSymbols: programSymbols,
 		Functions:      append([]SymbolBinding(nil), compiler.functions...),
 		CallPatches:    append([]CallPatch(nil), compiler.callPatches...),
 		EntryFunction:  compiler.entryFunction,
 		FrameSize:      compiler.maxLocalSlots,
 		FrameByteSize:  compiler.maxFrameByteSize,
+		ConstByteSize:  len(compiler.constImage),
+		ConstData:      append([]byte(nil), compiler.constImage...),
+		DataByteSize:   compiler.dataByteSize,
+		DataData:       append([]byte(nil), compiler.dataImage...),
 		BSSSize:        len(compiler.bssSymbols),
 		BSSByteSize:    compiler.bssByteSize,
 	}
@@ -262,6 +338,17 @@ func (compiler *Compiler) registerTopLevelDecl(decl *TopLevelDeclNode) {
 			binding.ByteOffset = alignUp(compiler.bssByteSize, binding.ByteAlignment)
 			compiler.bssByteSize = binding.ByteOffset + binding.ByteSize
 			compiler.bssSymbols = append(compiler.bssSymbols, binding)
+		case ScopeData:
+			binding.SlotIndex = len(compiler.dataSymbols)
+			binding.ByteOffset = alignUp(compiler.dataByteSize, binding.ByteAlignment)
+			compiler.dataByteSize = binding.ByteOffset + binding.ByteSize
+			compiler.ensureDataSize(compiler.dataByteSize)
+			compiler.dataSymbols = append(compiler.dataSymbols, binding)
+		case ScopeConst:
+			binding.SlotIndex = len(compiler.constSymbols)
+			binding.ByteOffset = alignUp(len(compiler.constImage), binding.ByteAlignment)
+			compiler.ensureConstSize(binding.ByteOffset + binding.ByteSize)
+			compiler.constSymbols = append(compiler.constSymbols, binding)
 		default:
 			compiler.fail(fmt.Errorf("compile error on line %d: variable %q has invalid scope %d", decl.Line, decl.Name, decl.Scope))
 			return
@@ -334,6 +421,7 @@ func (compiler *Compiler) compileFunction(function *FunctionNode) {
 	compiler.localSlots = make(map[string]int, len(function.Params))
 	compiler.localTypes = make(map[string]*Type, len(function.Params))
 	compiler.currentReturnType = function.ReturnType
+	compiler.localScopeStack = compiler.localScopeStack[:0]
 	compiler.localSlotCount = 0
 	frameByteSize := 0
 	paramOffsets := make([]int, 0, len(function.Params))
@@ -352,9 +440,10 @@ func (compiler *Compiler) compileFunction(function *FunctionNode) {
 	binding.ParamOffsets = paramOffsets
 	binding.FrameSlotCount = compiler.localSlotCount
 	binding.FrameByteSize = frameByteSize
+	compiler.currentFrameByteSize = frameByteSize
 	binding.ScriptAddress = len(compiler.code)
 	compiler.storeFunctionBinding(binding)
-	compiler.code.AppendFunctionHeader(ScriptFunctionHeader{
+	headerPos := compiler.code.AppendFunctionHeader(ScriptFunctionHeader{
 		ParamCount:    binding.ParamCount,
 		ParamKinds:    valueKindsFromTypes(binding.ParamTypes),
 		ParamOffsets:  binding.ParamOffsets,
@@ -369,14 +458,21 @@ func (compiler *Compiler) compileFunction(function *FunctionNode) {
 	if len(compiler.code) == 0 || Opcode(compiler.code[len(compiler.code)-1]) != OpRet {
 		compiler.emit(OpRet)
 	}
+	binding.FrameSlotCount = compiler.localSlotCount
+	binding.FrameByteSize = compiler.currentFrameByteSize
+	compiler.storeFunctionBinding(binding)
+	compiler.code.PatchInt(headerPos+6, compiler.currentFrameByteSize)
 	if compiler.localSlotCount > compiler.maxLocalSlots {
 		compiler.maxLocalSlots = compiler.localSlotCount
 	}
-	if frameByteSize > compiler.maxFrameByteSize {
-		compiler.maxFrameByteSize = frameByteSize
+	if compiler.currentFrameByteSize > compiler.maxFrameByteSize {
+		compiler.maxFrameByteSize = compiler.currentFrameByteSize
 	}
+	compiler.localSlots = nil
 	compiler.localTypes = nil
 	compiler.currentReturnType = nil
+	compiler.currentFrameByteSize = 0
+	compiler.localScopeStack = compiler.localScopeStack[:0]
 }
 
 func (compiler *Compiler) storeFunctionBinding(binding SymbolBinding) {
@@ -411,6 +507,8 @@ func (compiler *Compiler) exprType(expr ExprNode) *Type {
 			return Float32Type
 		}
 		return Int32Type
+	case *StringLiteral:
+		return PointerTo(QualifiedType(Uint8Type, true))
 	case *IdentNode:
 		if localType, ok := compiler.localTypes[node.Name]; ok {
 			return localType
@@ -422,6 +520,8 @@ func (compiler *Compiler) exprType(expr ExprNode) *Type {
 		left := compiler.exprType(node.Left)
 		right := compiler.exprType(node.Right)
 		switch node.Op {
+		case "&&", "||":
+			return BoolType
 		case "==", "!=", "<", ">", "<=", ">=":
 			return Int32Type
 		}
@@ -446,6 +546,13 @@ func (compiler *Compiler) compileExprAs(expr ExprNode, expected *Type) {
 	case *NumberLiteral:
 		compiler.emitTyped(OpPush, kind)
 		compiler.code.AppendImmediate(kind, compiler.numberLiteralBits(node, kind))
+	case *StringLiteral:
+		if !compiler.canAssignStringLiteral(expected) {
+			compiler.fail(fmt.Errorf("compile error on line %d: string literal is not assignable to %v", node.Line, expected))
+			return
+		}
+		compiler.emitInstruction(makeAddrInstruction(segmentConst))
+		compiler.code.AppendInt(compiler.internStringLiteral(node.Value))
 	case *IdentNode:
 		actualKind := kind
 		if actual := compiler.exprType(expr); actual != nil {
@@ -461,6 +568,10 @@ func (compiler *Compiler) compileExprAs(expr ExprNode, expected *Type) {
 		compiler.emitTyped(OpDereference, actualKind)
 		compiler.emitConvertIfNeeded(actualKind, kind)
 	case *BinaryExpr:
+		if node.Op == "&&" || node.Op == "||" {
+			compiler.compileLogicalExpr(node, kind)
+			return
+		}
 		binaryType := expected
 		comparisonOp := isComparisonOperator(node.Op)
 		if comparisonOp {
@@ -480,14 +591,8 @@ func (compiler *Compiler) compileExprAs(expr ExprNode, expected *Type) {
 			return
 		}
 		switch node.Op {
-		case "+":
-			compiler.emitTyped(OpAdd, binaryKind)
-		case "-":
-			compiler.emitTyped(OpSub, binaryKind)
-		case "*":
-			compiler.emitTyped(OpMul, binaryKind)
-		case "/":
-			compiler.emitTyped(OpDiv, binaryKind)
+		case "+", "-", "*", "/":
+			compiler.emitArithmetic(node.Op, binaryKind)
 		case "==", "!=", "<", ">", "<=", ">=":
 			compiler.emitComparison(node.Op, binaryKind)
 			compiler.emitConvertIfNeeded(KindInt32, kind)
@@ -529,6 +634,157 @@ func (compiler *Compiler) compileExprAs(expr ExprNode, expected *Type) {
 	}
 }
 
+func (compiler *Compiler) canAssignStringLiteral(target *Type) bool {
+	if target == nil || target.Kind != TypePointer || target.Base == nil {
+		return false
+	}
+	return target.Base.Kind == TypeUint8 && target.Base.IsConst
+}
+
+func (compiler *Compiler) internStringLiteral(value string) int {
+	if offset, ok := compiler.stringLiteralOffsets[value]; ok {
+		return offset
+	}
+	offset := len(compiler.constImage)
+	compiler.constImage = append(compiler.constImage, []byte(value)...)
+	compiler.constImage = append(compiler.constImage, 0)
+	compiler.stringLiteralOffsets[value] = offset
+	return offset
+}
+
+func (compiler *Compiler) ensureDataSize(size int) {
+	if size <= len(compiler.dataImage) {
+		return
+	}
+	compiler.dataImage = append(compiler.dataImage, make([]byte, size-len(compiler.dataImage))...)
+}
+
+func (compiler *Compiler) ensureConstSize(size int) {
+	if size <= len(compiler.constImage) {
+		return
+	}
+	compiler.constImage = append(compiler.constImage, make([]byte, size-len(compiler.constImage))...)
+}
+
+func (compiler *Compiler) initializeGlobal(binding SymbolBinding, expr ExprNode, line int) {
+	if compiler.err != nil {
+		return
+	}
+	if binding.Scope != ScopeData && binding.Scope != ScopeConst {
+		compiler.fail(fmt.Errorf("compile error on line %d: initializer for %q requires static storage", line, binding.Name))
+		return
+	}
+	bindingKind := valueKindFromType(binding.Type)
+	if binding.Type != nil && binding.Type.Kind == TypePointer {
+		bindingKind = KindAddress
+	}
+	bits, err := compiler.globalInitializerBits(binding.Type, expr, line)
+	if err != nil {
+		compiler.fail(err)
+		return
+	}
+	var segment MemorySegment
+	if binding.Scope == ScopeConst {
+		compiler.ensureConstSize(binding.ByteOffset + binding.ByteSize)
+		segment = MemorySegment(compiler.constImage)
+	} else {
+		segment = MemorySegment(compiler.dataImage)
+	}
+	if err := (&segment).WriteBits(binding.ByteOffset, bindingKind, bits); err != nil {
+		compiler.fail(fmt.Errorf("compile error on line %d: failed to encode initializer for %q: %v", line, binding.Name, err))
+		return
+	}
+	if binding.Scope == ScopeConst {
+		compiler.constImage = []byte(segment)
+		return
+	}
+	compiler.dataImage = []byte(segment)
+}
+
+func (compiler *Compiler) globalInitializerBits(target *Type, expr ExprNode, line int) (uint64, error) {
+	if target == nil {
+		return 0, fmt.Errorf("compile error on line %d: global initializer target has invalid type", line)
+	}
+	switch node := expr.(type) {
+	case *NumberLiteral:
+		if target.Kind == TypePointer {
+			if node.IsFloat || node.IntValue != 0 {
+				return 0, fmt.Errorf("compile error on line %d: pointer global initializer must be a string literal or 0", line)
+			}
+			return 0, nil
+		}
+		kind := valueKindFromType(target)
+		if kind == KindNone || kind == KindAddress {
+			return 0, fmt.Errorf("compile error on line %d: unsupported global initializer type %v", line, target)
+		}
+		return compiler.numberLiteralBits(node, kind), nil
+	case *StringLiteral:
+		if !compiler.canAssignStringLiteral(target) {
+			return 0, fmt.Errorf("compile error on line %d: string literal is not assignable to %v", line, target)
+		}
+		return uint64(uint32(makeAddress(segmentConst, compiler.internStringLiteral(node.Value)))), nil
+	default:
+		return 0, fmt.Errorf("compile error on line %d: unsupported global initializer %T", line, expr)
+	}
+}
+
+func (compiler *Compiler) compileLogicalExpr(node *BinaryExpr, expectedKind ValueKind) {
+	compiler.compileExprAs(node.Left, Int32Type)
+	if compiler.err != nil {
+		return
+	}
+
+	switch node.Op {
+	case "&&":
+		leftFalsePos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
+		compiler.compileExprAs(node.Right, Int32Type)
+		if compiler.err != nil {
+			return
+		}
+		rightFalsePos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
+		compiler.emitBooleanConstant(true)
+		endPos := compiler.emitOpWithOperand(OpJump, 0)
+		falsePos := len(compiler.code)
+		compiler.patchOperand(leftFalsePos, falsePos)
+		compiler.patchOperand(rightFalsePos, falsePos)
+		compiler.emitBooleanConstant(false)
+		compiler.patchOperand(endPos, len(compiler.code))
+	case "||":
+		leftFalsePos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
+		compiler.emitBooleanConstant(true)
+		leftEndPos := compiler.emitOpWithOperand(OpJump, 0)
+		rightStart := len(compiler.code)
+		compiler.patchOperand(leftFalsePos, rightStart)
+		compiler.compileExprAs(node.Right, Int32Type)
+		if compiler.err != nil {
+			return
+		}
+		rightFalsePos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
+		compiler.emitBooleanConstant(true)
+		rightEndPos := compiler.emitOpWithOperand(OpJump, 0)
+		falsePos := len(compiler.code)
+		compiler.patchOperand(rightFalsePos, falsePos)
+		compiler.emitBooleanConstant(false)
+		end := len(compiler.code)
+		compiler.patchOperand(leftEndPos, end)
+		compiler.patchOperand(rightEndPos, end)
+	default:
+		compiler.fail(fmt.Errorf("compile error on line %d: unsupported logical operator %q", node.Line, node.Op))
+		return
+	}
+
+	compiler.emitConvertIfNeeded(KindBool, expectedKind)
+}
+
+func (compiler *Compiler) emitBooleanConstant(value bool) {
+	compiler.emitTyped(OpPush, KindBool)
+	if value {
+		compiler.code.AppendImmediate(KindBool, 1)
+		return
+	}
+	compiler.code.AppendImmediate(KindBool, 0)
+}
+
 func (compiler *Compiler) emitConvertIfNeeded(from ValueKind, to ValueKind) {
 	if compiler.err != nil || from == to || to == KindNone || from == KindNone {
 		return
@@ -537,8 +793,7 @@ func (compiler *Compiler) emitConvertIfNeeded(from ValueKind, to ValueKind) {
 		compiler.fail(fmt.Errorf("compile error: unsupported conversion from kind %d to kind %d", from, to))
 		return
 	}
-	compiler.emitTyped(OpConvert, to)
-	compiler.code.AppendImmediate(KindUint8, uint64(from))
+	compiler.code.AppendInstruction(makeConvertInstruction(from, to))
 }
 
 func isNumericKind(kind ValueKind) bool {
@@ -590,6 +845,11 @@ func (compiler *Compiler) numberLiteralBits(node *NumberLiteral, kind ValueKind)
 	}
 	if node.IsFloat {
 		switch kind {
+		case KindBool:
+			if node.FloatValue == 0 {
+				return 0
+			}
+			return 1
 		case KindFloat32:
 			return uint64(math.Float32bits(float32(node.FloatValue)))
 		case KindFloat64:
@@ -599,6 +859,11 @@ func (compiler *Compiler) numberLiteralBits(node *NumberLiteral, kind ValueKind)
 		}
 	}
 	switch kind {
+	case KindBool:
+		if node.IntValue == 0 {
+			return 0
+		}
+		return 1
 	case KindFloat32:
 		return uint64(math.Float32bits(float32(node.IntValue)))
 	case KindFloat64:
@@ -609,6 +874,17 @@ func (compiler *Compiler) numberLiteralBits(node *NumberLiteral, kind ValueKind)
 }
 
 func (compiler *Compiler) compileBlock(block *BlockStmt) {
+	if block == nil {
+		return
+	}
+	savedSlots := cloneIntMap(compiler.localSlots)
+	savedTypes := cloneTypeMap(compiler.localTypes)
+	compiler.localScopeStack = append(compiler.localScopeStack, make(map[string]struct{}))
+	defer func() {
+		compiler.localSlots = savedSlots
+		compiler.localTypes = savedTypes
+		compiler.localScopeStack = compiler.localScopeStack[:len(compiler.localScopeStack)-1]
+	}()
 	for _, stmt := range block.Statements {
 		compiler.compileStmt(stmt)
 		if compiler.err != nil {
@@ -625,6 +901,8 @@ func (compiler *Compiler) compileStmt(stmt StmtNode) {
 	switch node := stmt.(type) {
 	case *BlockStmt:
 		compiler.compileBlock(node)
+	case *LocalDeclStmt:
+		compiler.compileLocalDecl(node)
 	case *IfStmt:
 		compiler.compileExprAs(node.Condition, Int32Type)
 		jumpPos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
@@ -688,6 +966,9 @@ func (compiler *Compiler) compileStmt(stmt StmtNode) {
 		}
 		compiler.compileExpr(node.Expr)
 	case *AssignStmt:
+		if compiler.rejectConstAssignment(node.Target, node.Line) {
+			return
+		}
 		targetType := compiler.exprType(node.Target)
 		compiler.compileExprAs(node.Value, targetType)
 		node.Target.EmitAddress(&compiler.code, compiler)
@@ -721,6 +1002,72 @@ func (compiler *Compiler) compileStmt(stmt StmtNode) {
 	}
 }
 
+func (compiler *Compiler) compileLocalDecl(node *LocalDeclStmt) {
+	if node == nil || compiler.err != nil {
+		return
+	}
+	compiler.allocateLocal(node.Name, node.Type, node.Line)
+	if compiler.err != nil || node.Initializer == nil {
+		return
+	}
+	compiler.compileExprAs(node.Initializer, node.Type)
+	ident := &IdentNode{Name: node.Name, Line: node.Line}
+	ident.EmitAddress(&compiler.code, compiler)
+	if compiler.err != nil {
+		return
+	}
+	assignKind := valueKindFromType(node.Type)
+	if assignKind == KindNone {
+		assignKind = KindInt32
+	}
+	compiler.emitTyped(OpAssign, assignKind)
+}
+
+func (compiler *Compiler) allocateLocal(name string, typ *Type, line int) {
+	if typ == nil {
+		compiler.fail(fmt.Errorf("compile error on line %d: local variable %q has invalid type", line, name))
+		return
+	}
+	if typ.Kind == TypeVoid {
+		compiler.fail(fmt.Errorf("compile error on line %d: local variable %q cannot have type void", line, name))
+		return
+	}
+	if len(compiler.localScopeStack) == 0 {
+		compiler.localScopeStack = append(compiler.localScopeStack, make(map[string]struct{}))
+	}
+	scope := compiler.localScopeStack[len(compiler.localScopeStack)-1]
+	if _, exists := scope[name]; exists {
+		compiler.fail(fmt.Errorf("compile error on line %d: duplicate local declaration %q", line, name))
+		return
+	}
+	offset := alignUp(compiler.currentFrameByteSize, typ.Alignment())
+	compiler.localSlots[name] = offset
+	compiler.localTypes[name] = typ
+	scope[name] = struct{}{}
+	compiler.currentFrameByteSize = offset + typ.Size
+	compiler.localSlotCount++
+}
+
+func (compiler *Compiler) rejectConstAssignment(target LvalueNode, line int) bool {
+	ident, ok := target.(*IdentNode)
+	if !ok {
+		return false
+	}
+	if localType, exists := compiler.localTypes[ident.Name]; exists {
+		if IsTopLevelConst(localType) {
+			compiler.fail(fmt.Errorf("compile error on line %d: cannot assign to const variable %q", line, ident.Name))
+			return true
+		}
+		return false
+	}
+	binding, ok := compiler.symbolBindings[ident.Name]
+	if ok && binding.Kind == DeclVariable && IsTopLevelConst(binding.Type) {
+		compiler.fail(fmt.Errorf("compile error on line %d: cannot assign to const variable %q", line, ident.Name))
+		return true
+	}
+	return false
+}
+
 func isComparisonOperator(op string) bool {
 	switch op {
 	case "==", "!=", "<", ">", "<=", ">=":
@@ -730,18 +1077,33 @@ func isComparisonOperator(op string) bool {
 	}
 }
 
-var comparisonOperators = map[string]Opcode{
-	"==": OpEqual,
-	"!=": OpNotEqual,
-	"<":  OpLess,
-	"<=": OpLessEqual,
-	">":  OpGreater,
-	">=": OpGreaterEqual,
+var comparisonOperators = map[string]CompareOp{
+	"==": CompareEqual,
+	"!=": CompareNotEqual,
+	"<":  CompareLess,
+	"<=": CompareLessEqual,
+	">":  CompareGreater,
+	">=": CompareGreaterEqual,
+}
+
+var arithmeticOperators = map[string]ArithmeticOp{
+	"+": ArithmeticAdd,
+	"-": ArithmeticSub,
+	"*": ArithmeticMul,
+	"/": ArithmeticDiv,
+}
+
+func (compiler *Compiler) emitArithmetic(op string, kind ValueKind) {
+	if arithmeticOp, ok := arithmeticOperators[op]; ok {
+		compiler.emitInstruction(makeArithmeticInstruction(kind, arithmeticOp))
+	} else {
+		compiler.fail(fmt.Errorf("compile error: arithmetic operator %q not yet fully supported", op))
+	}
 }
 
 func (compiler *Compiler) emitComparison(op string, kind ValueKind) {
-	if opcode, ok := comparisonOperators[op]; ok {
-		compiler.emitTyped(opcode, kind)
+	if compareOp, ok := comparisonOperators[op]; ok {
+		compiler.emitInstruction(makeCompareInstruction(kind, compareOp))
 	} else {
 		compiler.fail(fmt.Errorf("compile error: comparison operator %q not yet fully supported", op))
 	}
@@ -833,7 +1195,7 @@ func (compiler *Compiler) compileExpr(expr ExprNode) {
 
 func (node *IdentNode) EmitAddress(code *CodeMemory, compiler *Compiler) {
 	if slot, ok := compiler.localSlots[node.Name]; ok {
-		code.AppendInstruction(makeInstruction(OpAddrFrame, KindAddress, ModeNone, FlagNone))
+		code.AppendInstruction(makeAddrInstruction(segmentFrame))
 		code.AppendInt(slot)
 		return
 	}
@@ -841,11 +1203,19 @@ func (node *IdentNode) EmitAddress(code *CodeMemory, compiler *Compiler) {
 	if ok && binding.Kind == DeclVariable {
 		switch binding.Scope {
 		case ScopeBSS:
-			code.AppendInstruction(makeInstruction(OpAddrBSS, KindAddress, ModeNone, FlagNone))
+			code.AppendInstruction(makeAddrInstruction(segmentBSS))
+			code.AppendInt(binding.ByteOffset)
+			return
+		case ScopeData:
+			code.AppendInstruction(makeAddrInstruction(segmentData))
+			code.AppendInt(binding.ByteOffset)
+			return
+		case ScopeConst:
+			code.AppendInstruction(makeAddrInstruction(segmentConst))
 			code.AppendInt(binding.ByteOffset)
 			return
 		case ScopeExtern:
-			code.AppendInstruction(makeInstruction(OpAddrExtern, KindAddress, ModeNone, FlagNone))
+			code.AppendInstruction(makeAddrInstruction(segmentExtern))
 			code.AppendInt(binding.ByteOffset)
 			return
 		}

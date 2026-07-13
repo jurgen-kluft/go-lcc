@@ -133,3 +133,50 @@ void script_main() {
 		t.Fatal("expected named debug symbol for ready")
 	}
 }
+
+func TestCompilePlacesConstGlobalsInConstLayout(t *testing.T) {
+	script := `
+const int32 threshold = 7;
+const uint8* const asset_path = "asset/button_off";
+
+void script_main() {
+	return;
+}
+`
+
+	tokens, err := Tokenize(script)
+	if err != nil {
+		t.Fatalf("Tokenize failed: %v", err)
+	}
+	program, err := Parse(tokens)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	compiled, err := NewCompiler().Compile(program)
+	if err != nil {
+		t.Fatalf("Compile failed: %v", err)
+	}
+	if len(compiled.ProgramSymbols.ConstSymbols) != 2 {
+		t.Fatalf("expected 2 const symbols, got %d", len(compiled.ProgramSymbols.ConstSymbols))
+	}
+	if len(compiled.ProgramSymbols.DataSymbols) != 0 {
+		t.Fatalf("expected no data symbols, got %d", len(compiled.ProgramSymbols.DataSymbols))
+	}
+	if compiled.ConstByteSize <= 8 {
+		t.Fatalf("expected const image to include globals plus literal bytes, got %d", compiled.ConstByteSize)
+	}
+	threshold := compiled.ProgramSymbols.Symbols["threshold"]
+	assetPath := compiled.ProgramSymbols.Symbols["asset_path"]
+	if threshold.Scope != ScopeConst || assetPath.Scope != ScopeConst {
+		t.Fatalf("expected const scopes, got threshold=%d asset_path=%d", threshold.Scope, assetPath.Scope)
+	}
+	if threshold.ByteOffset != 0 {
+		t.Fatalf("expected first const global at offset 0, got %d", threshold.ByteOffset)
+	}
+	if assetPath.ByteOffset < threshold.ByteOffset+threshold.ByteSize {
+		t.Fatalf("expected pointer const global after threshold storage, got %d", assetPath.ByteOffset)
+	}
+	if !assetPath.Type.IsConst || assetPath.Type.Base == nil || !assetPath.Type.Base.IsConst {
+		t.Fatalf("expected const pointer to const uint8, got %v", assetPath.Type)
+	}
+}

@@ -2,7 +2,13 @@ package lcc
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+)
+
+var (
+	ErrInvalidAddressSegment = errors.New("invalid address segment")
+	ErrWriteToConstSegment   = errors.New("cannot write to const segment")
 )
 
 type Address int
@@ -26,11 +32,12 @@ const (
 	segmentFrame     memorySegment = 1
 	segmentBSS       memorySegment = 2
 	segmentExtern    memorySegment = 3
-	segmentStack     memorySegment = 4
-	segmentReserved0 memorySegment = 5
-	segmentReserved1 memorySegment = 6
-	segmentReserved2 memorySegment = 7
-	segmentCount     memorySegment = 8
+	segmentConst     memorySegment = 4
+	segmentData      memorySegment = 5
+	segmentStack     memorySegment = 6
+	segmentReserved0 memorySegment = 7
+	segmentReserved1 memorySegment = 8
+	segmentCount     memorySegment = 9
 )
 
 var segmentNames = [segmentCount]string{
@@ -38,14 +45,18 @@ var segmentNames = [segmentCount]string{
 	segmentFrame:     "frame",
 	segmentBSS:       "bss",
 	segmentExtern:    "extern",
+	segmentConst:     "const",
+	segmentData:      "data",
 	segmentStack:     "stack",
 	segmentReserved0: "reserved",
 	segmentReserved1: "reserved",
-	segmentReserved2: "reserved",
 }
 
 func (segment memorySegment) String() string {
-	return segmentNames[segment&(segmentCount-1)]
+	if segment >= segmentCount {
+		return "invalid"
+	}
+	return segmentNames[segment]
 }
 
 type MemorySegment []byte

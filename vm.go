@@ -30,7 +30,7 @@ func NewVMWithCallFrameCapacity(frameCapacity int, callFrameCapacity int) *VM {
 		callFrameCapacity = 1
 	}
 	return &VM{
-		memory:     NewProgramMemory(0, 0, frameCapacity, 32),
+		memory:     NewProgramMemory(0, 0, 0, 0, frameCapacity, 32),
 		callFrames: make([]callFrame, callFrameCapacity),
 	}
 }
@@ -194,6 +194,14 @@ func (vm *VM) Run(program *LinkedProgram) error {
 			vm.memory.segment[segmentBSS][index] = 0
 		}
 	}
+	if len(vm.memory.segment[segmentConst]) != program.ConstByteSize {
+		vm.memory.segment[segmentConst] = make([]byte, program.ConstByteSize)
+	}
+	copy(vm.memory.segment[segmentConst], program.ConstData)
+	if len(vm.memory.segment[segmentData]) != program.DataByteSize {
+		vm.memory.segment[segmentData] = make([]byte, program.DataByteSize)
+	}
+	copy(vm.memory.segment[segmentData], program.DataData)
 
 	vm.program = program
 	vm.pc = 0
@@ -214,75 +222,51 @@ func (vm *VM) Run(program *LinkedProgram) error {
 	for vm.pc < len(program.Text) {
 		instruction := program.Text.ReadInstruction(&vm.pc)
 		op := instruction.Opcode()
-		kind := instruction.Kind()
 
 		switch op {
 		case OpPush:
+			kind := instruction.Kind()
 			if kind == KindNone || kind == KindAddress {
 				return fmt.Errorf("vm error: unsupported push kind %d", kind)
 			}
 			if err := vm.pushKind(kind, program.Text.ReadImmediate(&vm.pc, kind)); err != nil {
 				return err
 			}
-		case OpAdd:
+		case OpArithmetic:
+			kind := instruction.Kind()
+			arithmeticOp := instruction.ArithmeticOp()
 			right, left, err := vm.popBinary(kind)
 			if err != nil {
 				return err
 			}
-			if err := vm.pushKind(kind, addBits(kind, left, right)); err != nil {
-				return err
-			}
-		case OpSub:
-			right, left, err := vm.popBinary(kind)
+			result, err := vm.executeArithmetic(kind, arithmeticOp, left, right)
 			if err != nil {
 				return err
 			}
-			if err := vm.pushKind(kind, subBits(kind, left, right)); err != nil {
-				return err
-			}
-		case OpMul:
-			right, left, err := vm.popBinary(kind)
-			if err != nil {
-				return err
-			}
-			if err := vm.pushKind(kind, mulBits(kind, left, right)); err != nil {
-				return err
-			}
-		case OpDiv:
-			right, left, err := vm.popBinary(kind)
-			if err != nil {
-				return err
-			}
-			if vm.isZero(kind, right) {
-				return fmt.Errorf("vm error: division by zero")
-			}
-			if err := vm.pushKind(kind, divBits(kind, left, right)); err != nil {
+			if err := vm.pushKind(kind, result); err != nil {
 				return err
 			}
 		case OpConvert:
-			fromKind := ValueKind(program.Text.ReadImmediate(&vm.pc, KindUint8))
+			fromKind := instruction.ConvertFromKind()
 			bits, err := vm.popKind(fromKind)
 			if err != nil {
 				return err
 			}
+			kind := instruction.Kind()
 			if err := vm.pushKind(kind, convertBits(fromKind, kind, bits)); err != nil {
 				return err
 			}
-		case OpAddrFrame:
-			frame, err := vm.currentFrame()
-			if err != nil {
-				return err
-			}
+		case OpAddr:
+			segment := instruction.AddressSegment()
 			offset := program.Text.ReadInt(&vm.pc)
-			if err := vm.pushAddress(makeAddress(segmentFrame, frame.localBase+offset)); err != nil {
-				return err
+			if segment == segmentFrame {
+				frame, err := vm.currentFrame()
+				if err != nil {
+					return err
+				}
+				offset += frame.localBase
 			}
-		case OpAddrBSS:
-			if err := vm.pushAddress(makeAddress(segmentBSS, program.Text.ReadInt(&vm.pc))); err != nil {
-				return err
-			}
-		case OpAddrExtern:
-			if err := vm.pushAddress(makeAddress(segmentExtern, program.Text.ReadInt(&vm.pc))); err != nil {
+			if err := vm.pushAddress(makeAddress(segment, offset)); err != nil {
 				return err
 			}
 		case OpOffset:
@@ -298,7 +282,8 @@ func (vm *VM) Run(program *LinkedProgram) error {
 				return err
 			}
 		case OpDereference:
-			if kind == KindNone || kind == KindAddress {
+			kind := instruction.Kind()
+			if kind == KindNone {
 				return fmt.Errorf("vm error: unsupported dereference kind %d", kind)
 			}
 			encodedAddress, err := vm.popAddress()
@@ -313,7 +298,8 @@ func (vm *VM) Run(program *LinkedProgram) error {
 				return err
 			}
 		case OpAssign:
-			if kind == KindNone || kind == KindAddress {
+			kind := instruction.Kind()
+			if kind == KindNone {
 				return fmt.Errorf("vm error: unsupported assign kind %d", kind)
 			}
 			encodedAddress, err := vm.popAddress()
@@ -327,52 +313,15 @@ func (vm *VM) Run(program *LinkedProgram) error {
 			if err := vm.memory.WriteBits(encodedAddress, kind, value); err != nil {
 				return err
 			}
-		case OpEqual:
+		case OpCompare:
+			kind := instruction.Kind()
+			compareOp := instruction.CompareOp()
 			right, left, err := vm.popBinary(kind)
 			if err != nil {
 				return err
 			}
-			if err := vm.PushInt32(compareBits(kind, left, right, OpEqual)); err != nil {
-				return err
-			}
-		case OpNotEqual:
-			right, left, err := vm.popBinary(kind)
-			if err != nil {
-				return err
-			}
-			if err := vm.PushInt32(compareBits(kind, left, right, OpNotEqual)); err != nil {
-				return err
-			}
-		case OpLess:
-			right, left, err := vm.popBinary(kind)
-			if err != nil {
-				return err
-			}
-			if err := vm.PushInt32(compareBits(kind, left, right, OpLess)); err != nil {
-				return err
-			}
-		case OpLessEqual:
-			right, left, err := vm.popBinary(kind)
-			if err != nil {
-				return err
-			}
-			if err := vm.PushInt32(compareBits(kind, left, right, OpLessEqual)); err != nil {
-				return err
-			}
-		case OpGreater:
-			right, left, err := vm.popBinary(kind)
-			if err != nil {
-				return err
-			}
-			if err := vm.PushInt32(compareBits(kind, left, right, OpGreater)); err != nil {
-				return err
-			}
-		case OpGreaterEqual:
-			right, left, err := vm.popBinary(kind)
-			if err != nil {
-				return err
-			}
-			if err := vm.PushInt32(compareBits(kind, left, right, OpGreaterEqual)); err != nil {
+			result := vm.executeComparison(kind, compareOp, left, right)
+			if err := vm.PushInt32(result); err != nil {
 				return err
 			}
 		case OpJumpIfFalse:
@@ -496,7 +445,7 @@ func (vm *VM) returnFromFunction() (bool, error) {
 	vm.callFrameTop--
 	frame := vm.callFrames[vm.callFrameTop]
 	var resultBits uint64
-	if frame.returnKind != KindNone {
+	if hasStackValueKind(frame.returnKind) {
 		value, err := vm.popKind(frame.returnKind)
 		if err != nil {
 			return false, err
@@ -505,7 +454,7 @@ func (vm *VM) returnFromFunction() (bool, error) {
 	}
 	vm.frameTop = frame.localBase
 	if vm.callFrameTop == 0 {
-		if frame.returnKind != KindNone {
+		if hasStackValueKind(frame.returnKind) {
 			if err := vm.pushKind(frame.returnKind, resultBits); err != nil {
 				return false, err
 			}
@@ -513,12 +462,16 @@ func (vm *VM) returnFromFunction() (bool, error) {
 		return true, nil
 	}
 	vm.pc = frame.returnPC
-	if frame.returnKind != KindNone {
+	if hasStackValueKind(frame.returnKind) {
 		if err := vm.pushKind(frame.returnKind, resultBits); err != nil {
 			return false, err
 		}
 	}
 	return false, nil
+}
+
+func hasStackValueKind(kind ValueKind) bool {
+	return kind != KindNone && kind != KindVoid
 }
 
 func (vm *VM) pushKind(kind ValueKind, bits uint64) error {
@@ -592,117 +545,152 @@ func (vm *VM) isZero(kind ValueKind, bits uint64) bool {
 	}
 }
 
-func addBits(kind ValueKind, left uint64, right uint64) uint64 {
+func (vm *VM) executeArithmetic(kind ValueKind, op ArithmeticOp, left uint64, right uint64) (uint64, error) {
 	switch kind {
 	case KindBool, KindByte, KindUint8, KindUint16, KindUint32, KindUint64:
-		return left + right
+		switch op {
+		case ArithmeticAdd:
+			return left + right, nil
+		case ArithmeticSub:
+			return left - right, nil
+		case ArithmeticMul:
+			return left * right, nil
+		case ArithmeticDiv:
+			if vm.isZero(kind, right) {
+				return 0, fmt.Errorf("vm error: division by zero")
+			}
+			return left / right, nil
+		}
 	case KindInt8:
-		return uint64(uint8(int8(left) + int8(right)))
+		leftValue, rightValue := int8(left), int8(right)
+		switch op {
+		case ArithmeticAdd:
+			return uint64(uint8(leftValue + rightValue)), nil
+		case ArithmeticSub:
+			return uint64(uint8(leftValue - rightValue)), nil
+		case ArithmeticMul:
+			return uint64(uint8(leftValue * rightValue)), nil
+		case ArithmeticDiv:
+			if vm.isZero(kind, right) {
+				return 0, fmt.Errorf("vm error: division by zero")
+			}
+			return uint64(uint8(leftValue / rightValue)), nil
+		}
 	case KindInt16:
-		return uint64(uint16(int16(left) + int16(right)))
+		leftValue, rightValue := int16(left), int16(right)
+		switch op {
+		case ArithmeticAdd:
+			return uint64(uint16(leftValue + rightValue)), nil
+		case ArithmeticSub:
+			return uint64(uint16(leftValue - rightValue)), nil
+		case ArithmeticMul:
+			return uint64(uint16(leftValue * rightValue)), nil
+		case ArithmeticDiv:
+			if vm.isZero(kind, right) {
+				return 0, fmt.Errorf("vm error: division by zero")
+			}
+			return uint64(uint16(leftValue / rightValue)), nil
+		}
 	case KindInt64:
-		return uint64(int64(left) + int64(right))
+		leftValue, rightValue := int64(left), int64(right)
+		switch op {
+		case ArithmeticAdd:
+			return uint64(leftValue + rightValue), nil
+		case ArithmeticSub:
+			return uint64(leftValue - rightValue), nil
+		case ArithmeticMul:
+			return uint64(leftValue * rightValue), nil
+		case ArithmeticDiv:
+			if vm.isZero(kind, right) {
+				return 0, fmt.Errorf("vm error: division by zero")
+			}
+			return uint64(leftValue / rightValue), nil
+		}
 	case KindInt32:
-		return uint64(uint32(int32(left) + int32(right)))
+		leftValue, rightValue := int32(left), int32(right)
+		switch op {
+		case ArithmeticAdd:
+			return uint64(uint32(leftValue + rightValue)), nil
+		case ArithmeticSub:
+			return uint64(uint32(leftValue - rightValue)), nil
+		case ArithmeticMul:
+			return uint64(uint32(leftValue * rightValue)), nil
+		case ArithmeticDiv:
+			if vm.isZero(kind, right) {
+				return 0, fmt.Errorf("vm error: division by zero")
+			}
+			return uint64(uint32(leftValue / rightValue)), nil
+		}
 	case KindFloat32:
-		return uint64(math.Float32bits(math.Float32frombits(uint32(left)) + math.Float32frombits(uint32(right))))
+		leftValue := math.Float32frombits(uint32(left))
+		rightValue := math.Float32frombits(uint32(right))
+		switch op {
+		case ArithmeticAdd:
+			return uint64(math.Float32bits(leftValue + rightValue)), nil
+		case ArithmeticSub:
+			return uint64(math.Float32bits(leftValue - rightValue)), nil
+		case ArithmeticMul:
+			return uint64(math.Float32bits(leftValue * rightValue)), nil
+		case ArithmeticDiv:
+			if vm.isZero(kind, right) {
+				return 0, fmt.Errorf("vm error: division by zero")
+			}
+			return uint64(math.Float32bits(leftValue / rightValue)), nil
+		}
 	case KindFloat64:
-		return math.Float64bits(math.Float64frombits(left) + math.Float64frombits(right))
+		leftValue := math.Float64frombits(left)
+		rightValue := math.Float64frombits(right)
+		switch op {
+		case ArithmeticAdd:
+			return math.Float64bits(leftValue + rightValue), nil
+		case ArithmeticSub:
+			return math.Float64bits(leftValue - rightValue), nil
+		case ArithmeticMul:
+			return math.Float64bits(leftValue * rightValue), nil
+		case ArithmeticDiv:
+			if vm.isZero(kind, right) {
+				return 0, fmt.Errorf("vm error: division by zero")
+			}
+			return math.Float64bits(leftValue / rightValue), nil
+		}
 	default:
-		return uint64(uint32(int32(left) + int32(right)))
+		// unhandled kind, treat as error
 	}
+
+	return 0, fmt.Errorf("vm error: unsupported arithmetic op %d", op)
 }
 
-func subBits(kind ValueKind, left uint64, right uint64) uint64 {
-	switch kind {
-	case KindBool, KindByte, KindUint8, KindUint16, KindUint32, KindUint64:
-		return left - right
-	case KindInt8:
-		return uint64(uint8(int8(left) - int8(right)))
-	case KindInt16:
-		return uint64(uint16(int16(left) - int16(right)))
-	case KindInt64:
-		return uint64(int64(left) - int64(right))
-	case KindInt32:
-		return uint64(uint32(int32(left) - int32(right)))
-	case KindFloat32:
-		return uint64(math.Float32bits(math.Float32frombits(uint32(left)) - math.Float32frombits(uint32(right))))
-	case KindFloat64:
-		return math.Float64bits(math.Float64frombits(left) - math.Float64frombits(right))
-	default:
-		return uint64(uint32(int32(left) - int32(right)))
-	}
+func (vm *VM) executeComparison(kind ValueKind, op CompareOp, left uint64, right uint64) int32 {
+	return compareBits(kind, left, right, op)
 }
 
-func mulBits(kind ValueKind, left uint64, right uint64) uint64 {
-	switch kind {
-	case KindBool, KindByte, KindUint8, KindUint16, KindUint32, KindUint64:
-		return left * right
-	case KindInt8:
-		return uint64(uint8(int8(left) * int8(right)))
-	case KindInt16:
-		return uint64(uint16(int16(left) * int16(right)))
-	case KindInt64:
-		return uint64(int64(left) * int64(right))
-	case KindInt32:
-		return uint64(uint32(int32(left) * int32(right)))
-	case KindFloat32:
-		return uint64(math.Float32bits(math.Float32frombits(uint32(left)) * math.Float32frombits(uint32(right))))
-	case KindFloat64:
-		return math.Float64bits(math.Float64frombits(left) * math.Float64frombits(right))
-	default:
-		return uint64(uint32(int32(left) * int32(right)))
-	}
-}
-
-func divBits(kind ValueKind, left uint64, right uint64) uint64 {
-	switch kind {
-	case KindBool, KindByte, KindUint8, KindUint16, KindUint32, KindUint64:
-		return left / right
-	case KindInt8:
-		return uint64(uint8(int8(left) / int8(right)))
-	case KindInt16:
-		return uint64(uint16(int16(left) / int16(right)))
-	case KindInt64:
-		return uint64(int64(left) / int64(right))
-	case KindInt32:
-		return uint64(uint32(int32(left) / int32(right)))
-	case KindFloat32:
-		return uint64(math.Float32bits(math.Float32frombits(uint32(left)) / math.Float32frombits(uint32(right))))
-	case KindFloat64:
-		return math.Float64bits(math.Float64frombits(left) / math.Float64frombits(right))
-	default:
-		return uint64(uint32(int32(left) / int32(right)))
-	}
-}
-
-func compareBits(kind ValueKind, left uint64, right uint64, op Opcode) int32 {
+func compareBits(kind ValueKind, left uint64, right uint64, op CompareOp) int32 {
 	switch kind {
 	case KindFloat32:
 		leftValue := float64(math.Float32frombits(uint32(left)))
 		rightValue := float64(math.Float32frombits(uint32(right)))
 		switch op {
-		case OpEqual:
+		case CompareEqual:
 			if leftValue == rightValue {
 				return 1
 			}
-		case OpNotEqual:
+		case CompareNotEqual:
 			if leftValue != rightValue {
 				return 1
 			}
-		case OpLess:
+		case CompareLess:
 			if leftValue < rightValue {
 				return 1
 			}
-		case OpLessEqual:
+		case CompareLessEqual:
 			if leftValue <= rightValue {
 				return 1
 			}
-		case OpGreater:
+		case CompareGreater:
 			if leftValue > rightValue {
 				return 1
 			}
-		case OpGreaterEqual:
+		case CompareGreaterEqual:
 			if leftValue >= rightValue {
 				return 1
 			}
@@ -711,27 +699,27 @@ func compareBits(kind ValueKind, left uint64, right uint64, op Opcode) int32 {
 		leftValue := math.Float64frombits(left)
 		rightValue := math.Float64frombits(right)
 		switch op {
-		case OpEqual:
+		case CompareEqual:
 			if leftValue == rightValue {
 				return 1
 			}
-		case OpNotEqual:
+		case CompareNotEqual:
 			if leftValue != rightValue {
 				return 1
 			}
-		case OpLess:
+		case CompareLess:
 			if leftValue < rightValue {
 				return 1
 			}
-		case OpLessEqual:
+		case CompareLessEqual:
 			if leftValue <= rightValue {
 				return 1
 			}
-		case OpGreater:
+		case CompareGreater:
 			if leftValue > rightValue {
 				return 1
 			}
-		case OpGreaterEqual:
+		case CompareGreaterEqual:
 			if leftValue >= rightValue {
 				return 1
 			}
@@ -740,27 +728,27 @@ func compareBits(kind ValueKind, left uint64, right uint64, op Opcode) int32 {
 		leftValue := bitsToInt64(kind, left)
 		rightValue := bitsToInt64(kind, right)
 		switch op {
-		case OpEqual:
+		case CompareEqual:
 			if leftValue == rightValue {
 				return 1
 			}
-		case OpNotEqual:
+		case CompareNotEqual:
 			if leftValue != rightValue {
 				return 1
 			}
-		case OpLess:
+		case CompareLess:
 			if leftValue < rightValue {
 				return 1
 			}
-		case OpLessEqual:
+		case CompareLessEqual:
 			if leftValue <= rightValue {
 				return 1
 			}
-		case OpGreater:
+		case CompareGreater:
 			if leftValue > rightValue {
 				return 1
 			}
-		case OpGreaterEqual:
+		case CompareGreaterEqual:
 			if leftValue >= rightValue {
 				return 1
 			}
@@ -769,27 +757,27 @@ func compareBits(kind ValueKind, left uint64, right uint64, op Opcode) int32 {
 		leftValue := bitsToUint64(kind, left)
 		rightValue := bitsToUint64(kind, right)
 		switch op {
-		case OpEqual:
+		case CompareEqual:
 			if leftValue == rightValue {
 				return 1
 			}
-		case OpNotEqual:
+		case CompareNotEqual:
 			if leftValue != rightValue {
 				return 1
 			}
-		case OpLess:
+		case CompareLess:
 			if leftValue < rightValue {
 				return 1
 			}
-		case OpLessEqual:
+		case CompareLessEqual:
 			if leftValue <= rightValue {
 				return 1
 			}
-		case OpGreater:
+		case CompareGreater:
 			if leftValue > rightValue {
 				return 1
 			}
-		case OpGreaterEqual:
+		case CompareGreaterEqual:
 			if leftValue >= rightValue {
 				return 1
 			}
@@ -798,27 +786,27 @@ func compareBits(kind ValueKind, left uint64, right uint64, op Opcode) int32 {
 		leftValue := bitsToInt64(kind, left)
 		rightValue := bitsToInt64(kind, right)
 		switch op {
-		case OpEqual:
+		case CompareEqual:
 			if leftValue == rightValue {
 				return 1
 			}
-		case OpNotEqual:
+		case CompareNotEqual:
 			if leftValue != rightValue {
 				return 1
 			}
-		case OpLess:
+		case CompareLess:
 			if leftValue < rightValue {
 				return 1
 			}
-		case OpLessEqual:
+		case CompareLessEqual:
 			if leftValue <= rightValue {
 				return 1
 			}
-		case OpGreater:
+		case CompareGreater:
 			if leftValue > rightValue {
 				return 1
 			}
-		case OpGreaterEqual:
+		case CompareGreaterEqual:
 			if leftValue >= rightValue {
 				return 1
 			}

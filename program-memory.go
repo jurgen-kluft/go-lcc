@@ -4,10 +4,12 @@ type ProgramMemory struct {
 	segment [segmentCount]MemorySegment
 }
 
-func NewProgramMemory(externCount, bssCount, frameCapacity, stackCapacity int) ProgramMemory {
+func NewProgramMemory(externCount, constCount, dataCount, bssCount, frameCapacity, stackCapacity int) ProgramMemory {
 	pm := ProgramMemory{
 		segment: [segmentCount]MemorySegment{
 			segmentExtern: NewMemorySegment(externCount, externCount),
+			segmentConst:  NewMemorySegment(constCount, constCount),
+			segmentData:   NewMemorySegment(dataCount, dataCount),
 			segmentBSS:    NewMemorySegment(bssCount, bssCount),
 			segmentFrame:  NewMemorySegment(frameCapacity, frameCapacity),
 			segmentStack:  NewMemorySegment(0, stackCapacity),
@@ -16,16 +18,29 @@ func NewProgramMemory(externCount, bssCount, frameCapacity, stackCapacity int) P
 	return pm
 }
 
-func (memory *ProgramMemory) segmentForAddress(address Address) *MemorySegment {
-	return &memory.segment[address.Segment()]
+func (memory *ProgramMemory) segmentForAddress(address Address) (*MemorySegment, error) {
+	segment := address.Segment()
+	if segment <= segmentInvalid || segment >= segmentCount {
+		return nil, ErrInvalidAddressSegment
+	}
+	return &memory.segment[segment], nil
 }
 
 func (memory *ProgramMemory) ReadBits(address Address, kind ValueKind) (uint64, error) {
-	segment := memory.segmentForAddress(address)
+	segment, err := memory.segmentForAddress(address)
+	if err != nil {
+		return 0, err
+	}
 	return segment.ReadBits(address.Index(), kind)
 }
 
 func (memory *ProgramMemory) WriteBits(address Address, kind ValueKind, bits uint64) error {
-	segment := memory.segmentForAddress(address)
+	if address.Segment() == segmentConst {
+		return ErrWriteToConstSegment
+	}
+	segment, err := memory.segmentForAddress(address)
+	if err != nil {
+		return err
+	}
 	return segment.WriteBits(address.Index(), kind, bits)
 }

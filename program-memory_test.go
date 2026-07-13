@@ -3,7 +3,7 @@ package lcc
 import "testing"
 
 func TestProgramMemoryRoutesByAddressSegment(t *testing.T) {
-	memory := NewProgramMemory(8, 8, 8, 8)
+	memory := NewProgramMemory(8, 8, 8, 8, 8, 8)
 
 	if err := memory.WriteBits(makeAddress(segmentExtern, 0), KindByte, 11); err != nil {
 		t.Fatalf("WriteBits extern failed: %v", err)
@@ -39,7 +39,7 @@ func TestVMAllocateExternMemoryCreatesOwnedExternSegment(t *testing.T) {
 }
 
 func TestProgramMemoryRejectsInvalidAddressSegment(t *testing.T) {
-	memory := NewProgramMemory(0, 0, 0, 0)
+	memory := NewProgramMemory(0, 0, 0, 0, 0, 0)
 	invalid := makeAddress(segmentInvalid, 0)
 
 	if _, err := memory.ReadBits(invalid, KindByte); err == nil {
@@ -47,5 +47,12 @@ func TestProgramMemoryRejectsInvalidAddressSegment(t *testing.T) {
 	}
 	if err := memory.WriteBits(invalid, KindByte, 1); err == nil {
 		t.Fatal("expected WriteBits to reject invalid segment")
+	}
+}
+
+func TestProgramMemoryRejectsWritesToConstSegment(t *testing.T) {
+	memory := NewProgramMemory(0, 4, 0, 0, 0, 0)
+	if err := memory.WriteBits(makeAddress(segmentConst, 0), KindByte, 1); err == nil {
+		t.Fatal("expected WriteBits to reject const segment writes")
 	}
 }

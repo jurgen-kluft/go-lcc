@@ -1,6 +1,158 @@
 package lcc
 
-import "testing"
+import (
+	"testing"
+)
+
+func parseProgram(t *testing.T, script string) *ProgramNode {
+	t.Helper()
+	tokens, err := Tokenize(script)
+	if err != nil {
+		t.Fatalf("Tokenize failed: %v", err)
+	}
+	program, err := Parse(tokens)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	return program
+}
+
+func TestParseExpressions(t *testing.T) {
+	script := `
+bool bool1;
+bool bool2;
+bool bool3;
+int counter;
+
+int script_main() {
+	int total = (1 + 2) * 3;
+	if (bool1 && (bool2 || bool3)) {
+		total = total + counter;
+	}
+	return total + helper(counter, 4);
+}
+
+int helper(int left, int right) {
+	return left + right;
+}
+`
+
+	program := parseProgram(t, script)
+	if len(program.Decls) != 4 {
+		t.Fatalf("expected 4 top-level declarations, got %d", len(program.Decls))
+	}
+	if len(program.Functions) != 2 {
+		t.Fatalf("expected 2 functions, got %d", len(program.Functions))
+	}
+	mainFn := program.Functions[0]
+	if len(mainFn.Body.Statements) != 3 {
+		t.Fatalf("expected 3 statements in script_main, got %d", len(mainFn.Body.Statements))
+	}
+	if _, ok := mainFn.Body.Statements[1].(*IfStmt); !ok {
+		t.Fatalf("expected second statement to be if, got %T", mainFn.Body.Statements[1])
+	}
+}
+
+func TestParseRejectsLocalDeclarationInForInitializer(t *testing.T) {
+	script := `
+int script_main() {
+	for (int i = 0; i < 4; i = i + 1) {
+	}
+	return 0;
+}
+`
+
+	tokens, err := Tokenize(script)
+	if err != nil {
+		t.Fatalf("Tokenize failed: %v", err)
+	}
+	if _, err := Parse(tokens); err == nil {
+		t.Fatal("expected parser to reject local declaration in for initializer")
+	}
+}
+
+func TestParseControlFlow(t *testing.T) {
+	script := `
+int counter;
+bool cond;
+
+int helper(int left, int right) {
+	return left + right;
+}
+
+int script_main() {
+	int total = helper(counter, 1 + 2);
+	while (counter < 3 && cond || total == 0) {
+		total = total + helper(counter, 2);
+		counter = counter + 1;
+	}
+	for (counter = 0; counter < 2; counter = counter + 1) {
+		switch (helper(counter, total)) {
+		case 1:
+			total = total + 10;
+			break;
+		default:
+			total = total + 1;
+			continue;
+		}
+	}
+	return total;
+}
+`
+
+	program := parseProgram(t, script)
+	mainFn := program.Functions[1]
+	if len(mainFn.Body.Statements) != 4 {
+		t.Fatalf("expected 4 top-level statements in script_main, got %d", len(mainFn.Body.Statements))
+	}
+	if _, ok := mainFn.Body.Statements[1].(*WhileStmt); !ok {
+		t.Fatalf("expected second statement to be while, got %T", mainFn.Body.Statements[1])
+	}
+	if _, ok := mainFn.Body.Statements[2].(*ForStmt); !ok {
+		t.Fatalf("expected third statement to be for, got %T", mainFn.Body.Statements[2])
+	}
+	if _, ok := mainFn.Body.Statements[3].(*ReturnStmt); !ok {
+		t.Fatalf("expected fourth statement to be return, got %T", mainFn.Body.Statements[3])
+	}
+}
+
+func TestParseLocalInitializersAndReturns(t *testing.T) {
+	script := `
+float32 ratio;
+bool ready;
+
+float64 helper(float32 value) {
+	return value + 2.5d;
+}
+
+float64 script_main() {
+	float32 base = 1.5f;
+	float64 total = helper((base + ratio) * 2.0f);
+	if (ready) {
+		return total + 3e1D;
+	}
+	return total;
+}
+`
+
+	program := parseProgram(t, script)
+	mainFn := program.Functions[1]
+	if len(mainFn.Body.Statements) != 4 {
+		t.Fatalf("expected 4 statements in script_main, got %d", len(mainFn.Body.Statements))
+	}
+	if _, ok := mainFn.Body.Statements[0].(*LocalDeclStmt); !ok {
+		t.Fatalf("expected first statement to be local declaration, got %T", mainFn.Body.Statements[0])
+	}
+	if _, ok := mainFn.Body.Statements[1].(*LocalDeclStmt); !ok {
+		t.Fatalf("expected second statement to be local declaration, got %T", mainFn.Body.Statements[1])
+	}
+	if _, ok := mainFn.Body.Statements[2].(*IfStmt); !ok {
+		t.Fatalf("expected third statement to be if, got %T", mainFn.Body.Statements[2])
+	}
+	if _, ok := mainFn.Body.Statements[3].(*ReturnStmt); !ok {
+		t.Fatalf("expected fourth statement to be return, got %T", mainFn.Body.Statements[3])
+	}
+}
 
 func TestParseExpandedPrimitiveTypes(t *testing.T) {
 	script := `
@@ -147,6 +299,273 @@ float64 script_main() {
 		if lit.FloatValue != check.value {
 			t.Fatalf("expected float value %v at statement %d, got %v", check.value, check.index, lit.FloatValue)
 		}
+	}
+}
+
+func TestParseStringLiteralAsExpression(t *testing.T) {
+	script := `
+void script_main() {
+	"asset/button_off";
+	return;
+}
+`
+
+	program := parseProgram(t, script)
+	stmt, ok := program.Functions[0].Body.Statements[0].(*ExprStmt)
+	if !ok {
+		t.Fatalf("expected expression statement, got %T", program.Functions[0].Body.Statements[0])
+	}
+	literal, ok := stmt.Expr.(*StringLiteral)
+	if !ok {
+		t.Fatalf("expected string literal, got %T", stmt.Expr)
+	}
+	if literal.Value != "asset/button_off" {
+		t.Fatalf("expected string literal value %q, got %q", "asset/button_off", literal.Value)
+	}
+}
+
+func TestParseGlobalPointerStringInitializer(t *testing.T) {
+	script := `
+const uint8* asset_path = "asset/button_off";
+
+void script_main() {
+	return;
+}
+`
+
+	program := parseProgram(t, script)
+	decl := program.Decls[0]
+	if decl.Scope != ScopeData {
+		t.Fatalf("expected initialized pointer global to use data scope, got %d", decl.Scope)
+	}
+	if decl.Type == nil || !decl.Type.Base.IsConst || decl.Type.IsConst {
+		t.Fatalf("expected parsed type const uint8*, got %v", decl.Type)
+	}
+	literal, ok := decl.Initializer.(*StringLiteral)
+	if !ok {
+		t.Fatalf("expected string literal initializer, got %T", decl.Initializer)
+	}
+	if literal.Value != "asset/button_off" {
+		t.Fatalf("expected initializer value %q, got %q", "asset/button_off", literal.Value)
+	}
+}
+
+func TestParseBooleanLiteralsAndLogicalPrecedence(t *testing.T) {
+	script := `
+int cond;
+
+int script_main() {
+	return true || false && cond == 1;
+}
+`
+
+	tokens, err := Tokenize(script)
+	if err != nil {
+		t.Fatalf("Tokenize failed: %v", err)
+	}
+	program, err := Parse(tokens)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	ret, ok := program.Functions[0].Body.Statements[0].(*ReturnStmt)
+	if !ok {
+		t.Fatalf("expected return statement, got %T", program.Functions[0].Body.Statements[0])
+	}
+	orExpr, ok := ret.Value.(*BinaryExpr)
+	if !ok {
+		t.Fatalf("expected top-level binary expression, got %T", ret.Value)
+	}
+	if orExpr.Op != "||" {
+		t.Fatalf("expected top-level operator ||, got %q", orExpr.Op)
+	}
+	leftLiteral, ok := orExpr.Left.(*NumberLiteral)
+	if !ok {
+		t.Fatalf("expected left operand to be numeric literal, got %T", orExpr.Left)
+	}
+	if leftLiteral.IntValue != 1 {
+		t.Fatalf("expected true to lower to 1, got %d", leftLiteral.IntValue)
+	}
+	andExpr, ok := orExpr.Right.(*BinaryExpr)
+	if !ok {
+		t.Fatalf("expected right operand to be binary expression, got %T", orExpr.Right)
+	}
+	if andExpr.Op != "&&" {
+		t.Fatalf("expected right operand operator &&, got %q", andExpr.Op)
+	}
+	falseLiteral, ok := andExpr.Left.(*NumberLiteral)
+	if !ok {
+		t.Fatalf("expected false literal to lower to numeric literal, got %T", andExpr.Left)
+	}
+	if falseLiteral.IntValue != 0 {
+		t.Fatalf("expected false to lower to 0, got %d", falseLiteral.IntValue)
+	}
+	compareExpr, ok := andExpr.Right.(*BinaryExpr)
+	if !ok {
+		t.Fatalf("expected comparison expression on && right operand, got %T", andExpr.Right)
+	}
+	if compareExpr.Op != "==" {
+		t.Fatalf("expected comparison operator ==, got %q", compareExpr.Op)
+	}
+}
+
+func TestParseLogicalPrecedenceWithExplicitGrouping(t *testing.T) {
+	script := `
+bool bool1;
+bool bool2;
+bool bool3;
+
+int script_main() {
+	return bool1 && (bool2 || bool3);
+}
+`
+
+	tokens, err := Tokenize(script)
+	if err != nil {
+		t.Fatalf("Tokenize failed: %v", err)
+	}
+	program, err := Parse(tokens)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	ret, ok := program.Functions[0].Body.Statements[0].(*ReturnStmt)
+	if !ok {
+		t.Fatalf("expected return statement, got %T", program.Functions[0].Body.Statements[0])
+	}
+	andExpr, ok := ret.Value.(*BinaryExpr)
+	if !ok {
+		t.Fatalf("expected top-level binary expression, got %T", ret.Value)
+	}
+	if andExpr.Op != "&&" {
+		t.Fatalf("expected top-level operator &&, got %q", andExpr.Op)
+	}
+	leftIdent, ok := andExpr.Left.(*IdentNode)
+	if !ok {
+		t.Fatalf("expected left operand identifier, got %T", andExpr.Left)
+	}
+	if leftIdent.Name != "bool1" {
+		t.Fatalf("expected left operand bool1, got %q", leftIdent.Name)
+	}
+	orExpr, ok := andExpr.Right.(*BinaryExpr)
+	if !ok {
+		t.Fatalf("expected grouped right operand to be binary expression, got %T", andExpr.Right)
+	}
+	if orExpr.Op != "||" {
+		t.Fatalf("expected grouped right operand operator ||, got %q", orExpr.Op)
+	}
+	leftGrouped, ok := orExpr.Left.(*IdentNode)
+	if !ok {
+		t.Fatalf("expected grouped left operand identifier, got %T", orExpr.Left)
+	}
+	if leftGrouped.Name != "bool2" {
+		t.Fatalf("expected grouped left operand bool2, got %q", leftGrouped.Name)
+	}
+	rightGrouped, ok := orExpr.Right.(*IdentNode)
+	if !ok {
+		t.Fatalf("expected grouped right operand identifier, got %T", orExpr.Right)
+	}
+	if rightGrouped.Name != "bool3" {
+		t.Fatalf("expected grouped right operand bool3, got %q", rightGrouped.Name)
+	}
+}
+
+func TestParseLocalDeclarations(t *testing.T) {
+	script := `
+int script_main() {
+	int count;
+	const bool ready = true;
+	{
+		int count = 3;
+		count;
+	}
+	return count;
+}
+`
+
+	tokens, err := Tokenize(script)
+	if err != nil {
+		t.Fatalf("Tokenize failed: %v", err)
+	}
+	program, err := Parse(tokens)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	statements := program.Functions[0].Body.Statements
+	countDecl, ok := statements[0].(*LocalDeclStmt)
+	if !ok {
+		t.Fatalf("expected first statement to be local declaration, got %T", statements[0])
+	}
+	if countDecl.Type != IntType || countDecl.Name != "count" || countDecl.Initializer != nil {
+		t.Fatalf("unexpected first local declaration: type=%v name=%q initializer=%T", countDecl.Type, countDecl.Name, countDecl.Initializer)
+	}
+	readyDecl, ok := statements[1].(*LocalDeclStmt)
+	if !ok {
+		t.Fatalf("expected second statement to be local declaration, got %T", statements[1])
+	}
+	if readyDecl.Type == nil || readyDecl.Type.Kind != TypeBool || !readyDecl.Type.IsConst || readyDecl.Name != "ready" {
+		t.Fatalf("unexpected second local declaration: type=%v name=%q", readyDecl.Type, readyDecl.Name)
+	}
+	readyInit, ok := readyDecl.Initializer.(*NumberLiteral)
+	if !ok || readyInit.IntValue != 1 {
+		t.Fatalf("expected bool initializer to lower to numeric literal 1, got %T value=%v", readyDecl.Initializer, readyDecl.Initializer)
+	}
+	innerBlock, ok := statements[2].(*BlockStmt)
+	if !ok {
+		t.Fatalf("expected third statement to be inner block, got %T", statements[2])
+	}
+	innerDecl, ok := innerBlock.Statements[0].(*LocalDeclStmt)
+	if !ok {
+		t.Fatalf("expected first inner statement to be local declaration, got %T", innerBlock.Statements[0])
+	}
+	if innerDecl.Name != "count" {
+		t.Fatalf("expected inner declaration to shadow count, got %q", innerDecl.Name)
+	}
+}
+
+func TestParseConstGlobalDeclaration(t *testing.T) {
+	script := `
+const uint8* asset_path = "asset/button_off";
+
+void script_main() {
+	return;
+}
+`
+
+	program := parseProgram(t, script)
+	decl := program.Decls[0]
+	if decl.Type == nil || decl.Type.Kind != TypePointer || decl.Type.Base == nil {
+		t.Fatalf("expected const global pointer type, got %v", decl.Type)
+	}
+	if decl.Type.IsConst {
+		t.Fatalf("expected pointer itself to remain mutable for const uint8*, got %v", decl.Type)
+	}
+	if decl.Type.Base.Kind != TypeUint8 || !decl.Type.Base.IsConst {
+		t.Fatalf("expected const global type uint8*, got %v", decl.Type)
+	}
+}
+
+func TestParseExternConstDeclarationRejected(t *testing.T) {
+	script := `extern(0) const uint8* asset_path;`
+	tokens, err := Tokenize(script)
+	if err != nil {
+		t.Fatalf("Tokenize failed: %v", err)
+	}
+	if _, err := Parse(tokens); err == nil {
+		t.Fatal("expected const extern declaration to fail")
+	}
+}
+
+func TestParseConstFunctionReturnType(t *testing.T) {
+	script := `
+const int script_main() {
+	return 0;
+}
+`
+	program := parseProgram(t, script)
+	if len(program.Functions) != 1 {
+		t.Fatalf("expected 1 function, got %d", len(program.Functions))
+	}
+	if program.Functions[0].ReturnType == nil || !program.Functions[0].ReturnType.IsConst || program.Functions[0].ReturnType.Kind != TypeInt32 {
+		t.Fatalf("expected const int return type, got %v", program.Functions[0].ReturnType)
 	}
 }
 

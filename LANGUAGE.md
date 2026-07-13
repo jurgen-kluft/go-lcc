@@ -32,23 +32,24 @@ void reduce_health(int delta) {
 The language currently supports:
 
 - Top-level global variables
+- Local variables inside blocks
+- `const` globals, locals, and parameters
 - Host-linked `extern` variables
 - Host-linked `extern` functions
 - Script-defined functions
 - Primitive numeric and boolean-like types
+- String literals lowered to pointer values
 - Numeric expressions
 - Function calls
 - `if`, `if/else`, `while`, `for`, `switch`, `break`, `continue`, and `return`
 
 The language does not currently support:
 
-- Local variable declarations inside functions
-- Strings
+- Local variable declarations inside `for` initializers
 - Arrays
 - Structs
 - Field access
 - Unary operators such as `-x`, `!x`, `*ptr`, `&x`
-- Logical operators such as `&&` and `||`
 - Bitwise operators
 - Modulo
 - Usable source-level pointer operations
@@ -64,12 +65,13 @@ top_level      ::= extern_decl | global_decl | function_decl
 
 extern_decl    ::= "extern" "(" number ")" type ident extern_tail ";"
 extern_tail    ::= "(" param_list? ")" | ε
-global_decl    ::= type ident ";"
+global_decl    ::= type ident ("=" expr)? ";"
 function_decl  ::= type ident "(" param_list? ")" block
 
 param_list     ::= param ("," param)*
 param          ::= type ident
-type           ::= named_type ("*")*
+const_qualifier ::= "const"
+type           ::= const_qualifier? named_type const_qualifier? ("*" const_qualifier?)*
 named_type     ::= "void" | "bool" | "byte" | "int" |
                    "int8" | "int16" | "int32" | "int64" |
                    "uint8" | "uint16" | "uint32" | "uint64" |
@@ -77,6 +79,7 @@ named_type     ::= "void" | "bool" | "byte" | "int" |
 
 block          ::= "{" stmt* "}"
 stmt           ::= block
+                 | local_decl
                  | if_stmt
                  | while_stmt
                  | for_stmt
@@ -100,14 +103,19 @@ break_stmt     ::= "break" ";"
 continue_stmt  ::= "continue" ";"
 assign_stmt    ::= lvalue "=" expr ";"
 assign_stmt_no_semi ::= lvalue "=" expr
+local_decl     ::= const_qualifier? type ident ("=" expr)? ";"
 expr_stmt      ::= expr ";"
 
-expr           ::= equality
-equality       ::= relational (("==" | "!=") relational)*
-relational     ::= additive (("<" | "<=" | ">" | ">=") additive)*
-additive       ::= multiplicative (("+" | "-") multiplicative)*
-multiplicative ::= primary (("*" | "/") primary)*
-primary        ::= number
+ expr           ::= logical_or
+ logical_or     ::= logical_and ("||" logical_and)*
+ logical_and    ::= equality (("&&") equality)*
+ equality       ::= relational (("==" | "!=") relational)*
+ relational     ::= additive (("<" | "<=" | ">" | ">=") additive)*
+ additive       ::= multiplicative (("+" | "-") multiplicative)*
+ multiplicative ::= primary (("*" | "/") primary)*
+ primary        ::= boolean
+                  | number
+                  | string
                  | ident
                  | call
                  | "(" expr ")"
@@ -116,13 +124,15 @@ arg_list       ::= expr ("," expr)*
 lvalue         ::= ident
 
 ident          ::= identifier
+ boolean       ::= "true" | "false"
 number         ::= integer_literal | float_literal
+string         ::= string_literal
 ```
 
 Notes:
 
 - `expr_stmt` is broader in the grammar than in the compiler. In practice, only function calls are accepted as standalone expression statements.
-- Pointer type syntax parses, but source-level pointer operators are not implemented.
+- Pointer type syntax is accepted in declarations and signatures, but source-level pointer operators are not implemented.
 - Boolean conditions are numeric at runtime: `0` is false and non-zero is true.
 
 ## Top-Level Declarations
@@ -134,12 +144,25 @@ There are two kinds of top-level declarations:
 
 ### Internal globals
 
-Internal globals are stored in VM-managed BSS memory and are zero-initialized before execution.
+Internal globals without an initializer are stored in VM-managed BSS memory and are zero-initialized before execution.
 
 ```c
 int counter;
 float32 ratio;
 bool ready;
+```
+
+Internal globals with an initializer are stored in writable DATA memory.
+
+```c
+int retries = 3;
+```
+
+Globals whose top-level type is const are stored in the read-only CONST segment. A pointer-to-const type such as `const uint8*` is not itself a const global, because the pointer value remains mutable.
+
+```c
+const int32 threshold = 7;
+const uint8* const asset_path = "asset/button_off";
 ```
 
 ### Extern variables
@@ -153,6 +176,8 @@ extern(16) float64 temperature;
 ```
 
 `extern(N)` gives the byte offset inside the extern memory block.
+
+`extern` variables cannot be declared with `const`.
 
 ### Extern functions
 
@@ -176,6 +201,31 @@ int add_one(int value) {
 ```
 
 The preferred entry point is `script_main`. If it is absent, the compiler currently falls back to the first script function it sees.
+
+### Local variables
+
+Local variables can be declared inside blocks with or without an initializer.
+
+```c
+int count;
+bool ready = true;
+```
+
+Locals whose top-level type is const cannot be reassigned after their declaration-time initialization.
+
+```c
+const int answer = 42;
+```
+
+`const uint8*` means a mutable pointer to const bytes, so the pointer can still be reassigned. `uint8* const` means a const pointer to mutable bytes.
+
+Pointer locals can be initialized from string literals only when the pointed-to type is `const uint8`.
+
+```c
+const uint8* asset_path = "asset/button_off";
+```
+
+Locals are block-scoped and are zero-initialized when no initializer is provided.
 
 ## Types
 
@@ -201,6 +251,29 @@ Supported type names:
 `int` is an alias for `int32`.
 
 Use `float32` and `float64` explicitly. Although `float` is tokenized as a keyword, it is not currently resolved as a valid named type.
+
+## String Literals
+
+String literals use double quotes and support a small escape set: `\"`, `\\`, `\n`, `\r`, `\t`, and `\0`.
+
+```c
+extern(0) void inspect(const uint8* path);
+
+void script_main() {
+    inspect("asset/button_off");
+    return;
+}
+```
+
+Current behavior:
+
+- String literals are stored in the CONST segment.
+- Identical string literals are de-duplicated inside the CONST segment.
+- Each literal is emitted as a NUL-terminated byte string for C-style `const char*` interop.
+- Only globals whose top-level type is const are stored in CONST.
+- Mutable globals with initializers are stored in DATA.
+- Zero-initialized globals remain in BSS.
+- String literals are assignable only to pointer targets whose pointee type is `const uint8`, such as `const uint8*` or `const uint8* const`.
 
 ## Literals
 
@@ -234,13 +307,22 @@ Use `float32` and `float64` explicitly. Although `float` is tokenized as a keywo
 3e1D
 ```
 
-### Important limitations
+### Boolean literals
 
-There are currently no dedicated boolean literals such as `true` or `false`. In practice, boolean values are expressed numerically:
+The language supports `true` and `false` as boolean literals.
+
+At runtime, boolean truth is still numeric:
+
+- `false` is `0`
+- any non-zero value is true
+
+Examples:
 
 ```c
+ready = true;
+ready = false;
 ready = 1;
-ready = 0;
+ready = 7;
 ```
 
 Unary minus is not part of the current grammar, so write:
@@ -259,12 +341,14 @@ instead of:
 
 Supported expressions:
 
+- Boolean literals
 - Numeric literals
 - Variable references
 - Function calls
 - Parenthesized expressions
 - Binary arithmetic
 - Comparisons
+- Logical operators
 
 ### Arithmetic
 
@@ -304,6 +388,28 @@ health >= limit
 ```
 
 Comparisons produce an `int32` result using `0` for false and `1` for true.
+
+### Logical operators
+
+Supported operators:
+
+- `&&`
+- `||`
+
+Examples:
+
+```c
+ready && enabled
+counter > 0 || limit == 3
+false && mark_true()
+```
+
+Logical operators use numeric truthiness, short-circuit evaluation, and produce a normalized boolean result:
+
+- `0` when the expression is false
+- `1` when the expression is true
+
+`&&` binds tighter than `||`, so `bool1 && bool2 || bool3` parses as `(bool1 && bool2) || bool3`. Use parentheses to override that grouping, for example `bool1 && (bool2 || bool3)`.
 
 ### Numeric promotion
 
@@ -570,10 +676,6 @@ Treat pointers as reserved or incomplete rather than usable.
 
 ## Current Limits and Gotchas
 
-### No boolean literals
-
-Use `0` and `1` instead of `false` and `true`.
-
 ### No unary operators
 
 These are not currently supported:
@@ -582,13 +684,6 @@ These are not currently supported:
 - `!x`
 - `*ptr`
 - `&x`
-
-### No logical operators
-
-These are not currently supported:
-
-- `&&`
-- `||`
 
 ### No bitwise operators
 
@@ -614,9 +709,14 @@ These are not currently supported:
 - field access
 - indexing
 
-### No local variables
+### No local declarations in `for` initializers
 
-Only function parameters and globals are currently available as named storage.
+This is still not supported:
+
+```c
+for (int i = 0; i < 4; i = i + 1) {
+}
+```
 
 ### Float type spelling
 

@@ -12,6 +12,7 @@ const (
 	TokKeyword
 	TokIdent
 	TokNum
+	TokString
 	TokOp
 	TokDelimiter
 )
@@ -25,10 +26,12 @@ type Token struct {
 var keywords = map[string]struct{}{
 	"break":   {},
 	"case":    {},
+	"const":   {},
 	"continue": {},
 	"default": {},
 	"else":    {},
 	"extern":  {},
+	"false":   {},
 	"bool":    {},
 	"byte":    {},
 	"float32": {},
@@ -41,6 +44,7 @@ var keywords = map[string]struct{}{
 	"int64":   {},
 	"return":  {},
 	"switch":  {},
+	"true":    {},
 	"uint8":   {},
 	"uint16":  {},
 	"uint32":  {},
@@ -83,6 +87,13 @@ func Tokenize(src string) ([]Token, error) {
 			tokens = append(tokens, Token{Kind: kind, Value: value, Line: line})
 		case unicode.IsDigit(char):
 			token, newIndex, err := tokenizeNumericLiteral(src, index, line)
+			if err != nil {
+				return nil, err
+			}
+			tokens = append(tokens, token)
+			index = newIndex
+		case char == '"':
+			token, newIndex, err := tokenizeStringLiteral(src, index, line)
 			if err != nil {
 				return nil, err
 			}
@@ -139,6 +150,46 @@ func tokenizeNumericLiteral(src string, start int, line int) (Token, int, error)
 	return Token{Kind: TokNum, Value: src[start:index], Line: line}, index, nil
 }
 
+func tokenizeStringLiteral(src string, start int, line int) (Token, int, error) {
+	index := start + 1
+	value := make([]rune, 0, 16)
+	for index < len(src) {
+		char := rune(src[index])
+		switch char {
+		case '"':
+			return Token{Kind: TokString, Value: string(value), Line: line}, index + 1, nil
+		case '\\':
+			if index+1 >= len(src) {
+				return Token{}, index, fmt.Errorf("lex error on line %d: unterminated string literal", line)
+			}
+			escaped := rune(src[index+1])
+			switch escaped {
+			case '"':
+				value = append(value, '"')
+			case '\\':
+				value = append(value, '\\')
+			case 'n':
+				value = append(value, '\n')
+			case 'r':
+				value = append(value, '\r')
+			case 't':
+				value = append(value, '\t')
+			case '0':
+				value = append(value, 0)
+			default:
+				return Token{}, index, fmt.Errorf("lex error on line %d: unsupported string escape %q", line, "\\"+string(escaped))
+			}
+			index += 2
+		case '\n', '\r':
+			return Token{}, index, fmt.Errorf("lex error on line %d: unterminated string literal", line)
+		default:
+			value = append(value, char)
+			index++
+		}
+	}
+	return Token{}, index, fmt.Errorf("lex error on line %d: unterminated string literal", line)
+}
+
 func isIdentStart(char rune) bool {
 	return char == '_' || unicode.IsLetter(char)
 }
@@ -149,7 +200,7 @@ func isIdentPart(char rune) bool {
 
 func isOperator(char rune) bool {
 	switch char {
-	case '+', '-', '*', '/', '=', '!', '<', '>':
+	case '+', '-', '*', '/', '=', '!', '<', '>', '&', '|':
 		return true
 	default:
 		return false
@@ -159,7 +210,7 @@ func isOperator(char rune) bool {
 func tokenizeOperator(src string, index int) (string, int) {
 	if index+1 < len(src) {
 		switch src[index : index+2] {
-		case "==", "!=", "<=", ">=":
+		case "==", "!=", "<=", ">=", "&&", "||":
 			return src[index : index+2], 2
 		}
 	}

@@ -1,10 +1,5 @@
 package lcc
 
-import (
-	"encoding/binary"
-	"fmt"
-)
-
 type TypeKind uint8
 
 const (
@@ -23,13 +18,39 @@ const (
 	TypeFloat32
 	TypeFloat64
 	TypePointer
+	TypeString
 )
 
 type Type struct {
-	Kind TypeKind
-	Name string
-	Size int
-	Base *Type
+	Kind    TypeKind
+	Name    string
+	Size    int
+	Base    *Type
+	IsConst bool
+}
+
+func (typ *Type) String() string {
+	if typ == nil {
+		return "<nil>"
+	}
+	prefix := ""
+	if typ.IsConst {
+		prefix = "const "
+	}
+	if typ.Kind == TypePointer {
+		if typ.Base == nil {
+			return prefix + "<invalid>*"
+		}
+		return typ.Base.String() + "*" + suffixConst(typ.IsConst)
+	}
+	return prefix + typ.Name
+}
+
+func suffixConst(isConst bool) string {
+	if isConst {
+		return " const"
+	}
+	return ""
 }
 
 func (typ *Type) Alignment() int {
@@ -39,7 +60,7 @@ func (typ *Type) Alignment() int {
 	if typ.Kind == TypeVoid {
 		return 1
 	}
-	if typ.Kind == TypePointer {
+	if typ.Kind == TypePointer || typ.Kind == TypeString {
 		return 4
 	}
 	if typ.Size <= 1 {
@@ -65,6 +86,7 @@ var (
 	Uint64Type  = &Type{Kind: TypeUint64, Name: "uint64", Size: 8}
 	Float32Type = &Type{Kind: TypeFloat32, Name: "float32", Size: 4}
 	Float64Type = &Type{Kind: TypeFloat64, Name: "float64", Size: 8}
+	StringType  = &Type{Kind: TypeString, Name: "string", Size: 4, Base: Uint8Type}
 	IntType     = Int32Type
 )
 
@@ -87,6 +109,18 @@ var namedTypes = map[string]*Type{
 
 func LookupNamedType(name string) *Type {
 	return namedTypes[name]
+}
+
+func QualifiedType(base *Type, isConst bool) *Type {
+	if base == nil {
+		return nil
+	}
+	if !isConst {
+		return base
+	}
+	clone := *base
+	clone.IsConst = true
+	return &clone
 }
 
 func (typ *Type) IsSignedInteger() bool {
@@ -128,10 +162,28 @@ func (typ *Type) IsNumeric() bool {
 }
 
 func PointerTo(base *Type) *Type {
+	return PointerToQualified(base, false)
+}
+
+func PointerToQualified(base *Type, isConst bool) *Type {
 	if base == nil {
 		return nil
 	}
-	return &Type{Kind: TypePointer, Name: base.Name + "*", Size: 1, Base: base}
+	return &Type{Kind: TypePointer, Name: base.Name + "*", Size: 4, Base: base, IsConst: isConst}
+}
+
+func IsSameType(left *Type, right *Type) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	if left.Kind != right.Kind || left.Name != right.Name || left.Size != right.Size || left.IsConst != right.IsConst {
+		return false
+	}
+	return IsSameType(left.Base, right.Base)
+}
+
+func IsTopLevelConst(typ *Type) bool {
+	return typ != nil && typ.IsConst
 }
 
 var typeToValueKind = map[TypeKind]ValueKind{
@@ -142,6 +194,7 @@ var typeToValueKind = map[TypeKind]ValueKind{
 	TypeUint8: KindUint8, TypeUint16: KindUint16, TypeUint32: KindUint32, TypeUint64: KindUint64,
 	TypeFloat32: KindFloat32, TypeFloat64: KindFloat64,
 	TypePointer: KindAddress,
+	TypeString:  KindAddress,
 }
 
 func valueKindFromType(typ *Type) ValueKind {
@@ -156,30 +209,45 @@ func valueKindFromType(typ *Type) ValueKind {
 
 type Opcode byte
 
+// Note: Keep the number of opcodes below 32 to fit in 5 bits of the instruction encoding.
 const (
 	OpPush Opcode = iota + 1
-	OpAdd
-	OpSub
-	OpMul
-	OpDiv
+	OpArithmetic
 	OpConvert
-	OpAddrFrame
-	OpAddrBSS
-	OpAddrExtern
+	OpAddr
 	OpOffset
 	OpDereference
 	OpAssign
-	OpEqual
-	OpNotEqual
-	OpLess
-	OpLessEqual
-	OpGreater
-	OpGreaterEqual
+	OpCompare
 	OpJumpIfFalse
 	OpJump
 	OpCall
 	OpCallExtern
 	OpRet
+)
+
+type ArithmeticOp byte
+
+// Note: Keep the number of arithmetic operations below 8 to fit in 3 bits of the instruction encoding.
+const (
+	ArithmeticInvalid ArithmeticOp = iota
+	ArithmeticAdd
+	ArithmeticSub
+	ArithmeticMul
+	ArithmeticDiv
+)
+
+type CompareOp byte
+
+// Note: Keep the number of compare operations below 8 to fit in 3 bits of the instruction encoding.
+const (
+	CompareInvalid CompareOp = iota
+	CompareEqual
+	CompareNotEqual
+	CompareLess
+	CompareLessEqual
+	CompareGreater
+	CompareGreaterEqual
 )
 
 type ValueKind byte
@@ -217,51 +285,14 @@ func (kind ValueKind) Size() int {
 	return size
 }
 
-type InstructionMode byte
-
-const (
-	ModeNone InstructionMode = iota
-	ModeImplicit
-	ModeExtend
-	ModeReserved
-)
-
-type InstructionFlag byte
-
-const (
-	FlagNone   InstructionFlag = 0
-	FlagSigned InstructionFlag = 1 << iota
-	FlagReserved
-)
-
-type Instruction uint16
-
-func makeInstruction(op Opcode, kind ValueKind, mode InstructionMode, flags InstructionFlag) Instruction {
-	return Instruction(uint16(op) | uint16(kind&0x0f)<<8 | uint16(mode&0x03)<<12 | uint16(flags&0x03)<<14)
-}
-
-func (instruction Instruction) Opcode() Opcode {
-	return Opcode(byte(instruction))
-}
-
-func (instruction Instruction) Kind() ValueKind {
-	return ValueKind((instruction >> 8) & 0x0f)
-}
-
-func (instruction Instruction) Mode() InstructionMode {
-	return InstructionMode((instruction >> 12) & 0x03)
-}
-
-func (instruction Instruction) Flags() InstructionFlag {
-	return InstructionFlag((instruction >> 14) & 0x03)
-}
-
 type ScopeKind int
 
 const (
 	ScopeInvalid ScopeKind = iota
 	ScopeFrame
 	ScopeBSS
+	ScopeConst
+	ScopeData
 	ScopeExtern
 )
 
@@ -309,145 +340,12 @@ type ScriptFunctionHeader struct {
 	ReturnKind    ValueKind
 }
 
-type CodeMemory []byte
-
-func (code CodeMemory) Clone() CodeMemory {
-	if len(code) == 0 {
-		return nil
-	}
-	return append(CodeMemory(nil), code...)
-}
-
-func (code *CodeMemory) AppendInstruction(instruction Instruction) {
-	start := len(*code)
-	*code = append(*code, 0, 0)
-	binary.LittleEndian.PutUint16((*code)[start:start+2], uint16(instruction))
-}
-
-func (code CodeMemory) PatchInstruction(position int, instruction Instruction) {
-	binary.LittleEndian.PutUint16(code[position:position+2], uint16(instruction))
-}
-
-func (code CodeMemory) ReadInstruction(ip *int) Instruction {
-	instruction := Instruction(binary.LittleEndian.Uint16(code[*ip : *ip+2]))
-	*ip += 2
-	return instruction
-}
-
-func (code *CodeMemory) AppendImmediate(kind ValueKind, value uint64) {
-	start := len(*code)
-	size := kind.Size()
-	switch size {
-	case 1:
-		*code = append(*code, 0)
-	case 2:
-		*code = append(*code, 0, 0)
-	case 4:
-		*code = append(*code, 0, 0, 0, 0)
-	case 8:
-		*code = append(*code, 0, 0, 0, 0, 0, 0, 0, 0)
-	}
-	switch size {
-	case 1:
-		(*code)[start] = byte(value)
-	case 2:
-		binary.LittleEndian.PutUint16((*code)[start:start+2], uint16(value))
-	case 4:
-		binary.LittleEndian.PutUint32((*code)[start:start+4], uint32(value))
-	case 8:
-		binary.LittleEndian.PutUint64((*code)[start:start+8], value)
-	}
-}
-
-func (code CodeMemory) ReadImmediate(ip *int, kind ValueKind) (value uint64) {
-	switch kind.Size() {
-	case 1:
-		value = uint64(code[*ip])
-		*ip += 1
-	case 2:
-		value = uint64(binary.LittleEndian.Uint16(code[*ip : *ip+2]))
-		*ip += 2
-	case 4:
-		value = uint64(binary.LittleEndian.Uint32(code[*ip : *ip+4]))
-		*ip += 4
-	case 8:
-		value = binary.LittleEndian.Uint64(code[*ip : *ip+8])
-		*ip += 8
-	default:
-		value = 0
-	}
-	return
-}
-
-func (code *CodeMemory) AppendInt(value int) {
-	start := len(*code)
-	*code = append(*code, 0, 0, 0, 0)
-	binary.LittleEndian.PutUint32((*code)[start:start+4], uint32(value))
-}
-
-func (code CodeMemory) PatchInt(position int, value int) {
-	binary.LittleEndian.PutUint32(code[position:position+4], uint32(value))
-}
-
-func (code CodeMemory) ReadInt(ip *int) int {
-	value := int(int32(binary.LittleEndian.Uint32(code[*ip : *ip+4])))
-	*ip += 4
-	return value
-}
-
-func (code *CodeMemory) AppendFunctionHeader(header ScriptFunctionHeader) int {
-	start := len(*code)
-	code.AppendImmediate(KindUint8, uint64(scriptFunctionHeaderMagic))
-	code.AppendImmediate(KindUint8, uint64(header.ReturnKind))
-	code.AppendInt(header.ParamCount)
-	code.AppendInt(header.FrameByteSize)
-	for index := 0; index < header.ParamCount; index++ {
-		kind := KindNone
-		if index < len(header.ParamKinds) {
-			kind = header.ParamKinds[index]
-		}
-		code.AppendImmediate(KindUint8, uint64(kind))
-		offset := 0
-		if index < len(header.ParamOffsets) {
-			offset = header.ParamOffsets[index]
-		}
-		code.AppendInt(offset)
-	}
-	return start
-}
-
-func (code CodeMemory) ReadFunctionHeader(address int) (ScriptFunctionHeader, error) {
-	ip := address
-	if ip < 0 || ip >= len(code) {
-		return ScriptFunctionHeader{}, fmt.Errorf("vm error: function header address %d out of range", address)
-	}
-	if got := byte(code.ReadImmediate(&ip, KindUint8)); got != scriptFunctionHeaderMagic {
-		return ScriptFunctionHeader{}, fmt.Errorf("vm error: invalid function header magic 0x%x at %d", got, address)
-	}
-	header := ScriptFunctionHeader{
-		ReturnKind:    ValueKind(code.ReadImmediate(&ip, KindUint8)),
-		ParamCount:    code.ReadInt(&ip),
-		FrameByteSize: code.ReadInt(&ip),
-	}
-	if header.ParamCount < 0 {
-		return ScriptFunctionHeader{}, fmt.Errorf("vm error: invalid param count %d at %d", header.ParamCount, address)
-	}
-	if header.ParamCount > 0 {
-		header.ParamKinds = make([]ValueKind, header.ParamCount)
-		header.ParamOffsets = make([]int, header.ParamCount)
-		for index := 0; index < header.ParamCount; index++ {
-			header.ParamKinds[index] = ValueKind(code.ReadImmediate(&ip, KindUint8))
-			header.ParamOffsets[index] = code.ReadInt(&ip)
-		}
-	}
-	header.BodyAddress = ip
-	return header, nil
-}
-
 type ProgramSymbols struct {
 	Symbols       map[string]SymbolBinding
 	ExternSymbols []SymbolBinding
 	BSSSymbols    []SymbolBinding
+	DataSymbols   []SymbolBinding
+	ConstSymbols  []SymbolBinding
 }
 
 func NewProgramSymbols() *ProgramSymbols {
@@ -455,6 +353,8 @@ func NewProgramSymbols() *ProgramSymbols {
 		Symbols:       make(map[string]SymbolBinding),
 		ExternSymbols: make([]SymbolBinding, 0),
 		BSSSymbols:    make([]SymbolBinding, 0),
+		DataSymbols:   make([]SymbolBinding, 0),
+		ConstSymbols:  make([]SymbolBinding, 0),
 	}
 }
 
@@ -466,6 +366,8 @@ func CopyProgramSymbols(src *ProgramSymbols) *ProgramSymbols {
 		Symbols:       cloneBindingsMap(src.Symbols),
 		ExternSymbols: append([]SymbolBinding(nil), src.ExternSymbols...),
 		BSSSymbols:    append([]SymbolBinding(nil), src.BSSSymbols...),
+		DataSymbols:   append([]SymbolBinding(nil), src.DataSymbols...),
+		ConstSymbols:  append([]SymbolBinding(nil), src.ConstSymbols...),
 	}
 	return dst
 }
@@ -475,6 +377,10 @@ type LinkedProgram struct {
 	EntryPoint    int
 	FrameSize     int
 	FrameByteSize int
+	ConstByteSize int
+	ConstData     []byte
+	DataByteSize  int
+	DataData      []byte
 	BSSSize       int
 	BSSByteSize   int
 	DebugSymbols  *ProgramSymbols
@@ -488,6 +394,10 @@ type RelocatableProgram struct {
 	EntryFunction  int
 	FrameSize      int
 	FrameByteSize  int
+	ConstByteSize  int
+	ConstData      []byte
+	DataByteSize   int
+	DataData       []byte
 	BSSSize        int
 	BSSByteSize    int
 }
