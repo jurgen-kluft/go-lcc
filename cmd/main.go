@@ -36,6 +36,7 @@ void reduce_health(int delta) {
 
 	program, err := cova.Parse(tokens)
 	check(err)
+	check(cova.Optimize(program))
 
 	compiler := cova.NewCompiler()
 	compiled, err := compiler.Compile(program)

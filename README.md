@@ -30,6 +30,25 @@ String literals are stored in a CONST segment as NUL-terminated byte strings. Ze
 
 Booleans use numeric truthiness at runtime: `false` is `0`, and any non-zero value is true. Logical operators short-circuit and produce normalized `0` or `1` results.
 
+## Optimization
+
+Optimization is an explicit, optional stage between parsing and compilation:
+
+```go
+program, err := cova.Parse(tokens)
+if err != nil {
+    return err
+}
+if err := cova.Optimize(program); err != nil {
+    return err
+}
+compiled, err := cova.NewCompiler().Compile(program)
+```
+
+`Optimize` mutates the AST in place. Its constant folding pass handles numeric arithmetic, comparisons, and logical expressions, including short-circuit branches. A reachable constant division by zero is reported as an optimization error; an unreachable short-circuit branch is not evaluated.
+
+The optimizer is intentionally isolated from compiler and VM internals. It owns the small amount of type promotion, conversion, and evaluation logic required for folding, and optimized-versus-unoptimized tests guard that duplicated behavior against semantic drift.
+
 ## Example
 
 ```c
