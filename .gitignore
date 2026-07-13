@@ -18,6 +18,8 @@ tags/
 !*.zig
 
 !*.go
+!go.mod
+!go.sum
 
 !*.cs
 !*.csproj

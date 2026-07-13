@@ -681,8 +681,8 @@ func (compiler *Compiler) initializeGlobal(binding SymbolBinding, expr ExprNode,
 	} else {
 		segment = MemorySegment(compiler.dataImage)
 	}
-	if err := (&segment).WriteBits(binding.ByteOffset, bindingKind, bits); err != nil {
-		compiler.fail(fmt.Errorf("compile error on line %d: failed to encode initializer for %q: %v", line, binding.Name, err))
+	if status := (&segment).WriteBits(binding.ByteOffset, bindingKind, bits); status != VMStatusOK {
+		compiler.fail(fmt.Errorf("compile error on line %d: failed to encode initializer for %q: %s", line, binding.Name, status))
 		return
 	}
 	if binding.Scope == ScopeConst {

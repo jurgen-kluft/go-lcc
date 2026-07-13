@@ -30,6 +30,29 @@ String literals are stored in a CONST segment as NUL-terminated byte strings. Ze
 
 Booleans use numeric truthiness at runtime: `false` is `0`, and any non-zero value is true. Logical operators short-circuit and produce normalized `0` or `1` results.
 
+## VM Workspace Policy
+
+The host owns execution workspace sizing. `VMConfig.FrameCapacity`, `StackCapacity`, and `CallFrameCapacity` are fixed limits selected from the application's memory budget; the compiler and linker do not infer aggregate frame use, maximum operand-stack height, or maximum call depth. `LoadProgram` validates the program image independently of these limits. A limit that is too small produces `VMStatusFrameOverflow`, `VMStatusStackOverflow`, or `VMStatusCallFrameOverflow` only if execution reaches the operation that needs more workspace.
+
+`LinkedProgram.FrameByteSize` is compiler metadata for the largest individual function frame. It is not aggregate call-path memory and is not a complete VM sizing recommendation.
+
+VM runtime and stack APIs return the stable numeric `VMStatus` enum directly. `VMStatusOK` is zero. `VMStatus.String()` provides optional diagnostics outside the execution hot path, while `VM.FaultInfo()` exposes the failing PC, target, required/available capacity, and host callback status without formatting strings.
+
+```go
+vm := cova.NewVMWithConfig(cova.VMConfig{
+    FrameCapacity:     512,
+    StackCapacity:     128,
+    CallFrameCapacity: 8,
+})
+if status := vm.LoadProgram(linked); status != cova.VMStatusOK {
+    return fmt.Errorf("load failed: %s", status)
+}
+if status := vm.RunLoaded(); status != cova.VMStatusOK {
+    fault := vm.FaultInfo()
+    return fmt.Errorf("VM failed at PC %d: %s", fault.PC, status)
+}
+```
+
 ## Optimization
 
 Optimization is an explicit, optional stage between parsing and compilation:

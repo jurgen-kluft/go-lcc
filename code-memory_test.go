@@ -1,9 +1,6 @@
 package cova
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 func TestValueKindSizeRejectsInvalidKind(t *testing.T) {
 	if got := ValueKind(255).Size(); got != 0 {
@@ -14,37 +11,37 @@ func TestValueKindSizeRejectsInvalidKind(t *testing.T) {
 func TestCheckedCodeReadersRejectTruncatedInput(t *testing.T) {
 	tests := []struct {
 		name string
-		read func(CodeMemory) error
+		read func(CodeMemory) VMStatus
 	}{
 		{
 			name: "instruction",
-			read: func(code CodeMemory) error {
+			read: func(code CodeMemory) VMStatus {
 				ip := 0
-				_, err := code.ReadInstructionChecked(&ip)
-				return err
+				_, status := code.ReadInstructionChecked(&ip)
+				return status
 			},
 		},
 		{
 			name: "immediate",
-			read: func(code CodeMemory) error {
+			read: func(code CodeMemory) VMStatus {
 				ip := 0
-				_, err := code.ReadImmediateChecked(&ip, KindUint32)
-				return err
+				_, status := code.ReadImmediateChecked(&ip, KindUint32)
+				return status
 			},
 		},
 		{
 			name: "int operand",
-			read: func(code CodeMemory) error {
+			read: func(code CodeMemory) VMStatus {
 				ip := 0
-				_, err := code.ReadIntChecked(&ip)
-				return err
+				_, status := code.ReadIntChecked(&ip)
+				return status
 			},
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if err := test.read(CodeMemory{0}); err == nil {
+			if status := test.read(CodeMemory{0}); status != VMStatusMalformedBytecode {
 				t.Fatal("expected truncated input error")
 			}
 		})
@@ -59,8 +56,8 @@ func TestRunRejectsTruncatedInstructionWithoutPanic(t *testing.T) {
 		Functions:  []ScriptFunctionDescriptor{{BodyAddress: 0, ReturnKind: KindVoid}},
 	}
 
-	if err := NewVM(0).Run(program); err == nil || !strings.Contains(err.Error(), "truncated instruction") {
-		t.Fatalf("expected truncated instruction error, got %v", err)
+	if status := NewVM(0).Run(program); status != VMStatusMalformedBytecode {
+		t.Fatalf("expected malformed bytecode status, got %s", status)
 	}
 }
 
@@ -74,7 +71,7 @@ func TestRunRejectsTruncatedOperandWithoutPanic(t *testing.T) {
 		Functions:  []ScriptFunctionDescriptor{{BodyAddress: 0, ReturnKind: KindVoid}},
 	}
 
-	if err := NewVM(0).Run(program); err == nil || !strings.Contains(err.Error(), "truncated 4-byte operand") {
-		t.Fatalf("expected truncated operand error, got %v", err)
+	if status := NewVM(0).Run(program); status != VMStatusMalformedBytecode {
+		t.Fatalf("expected malformed bytecode status, got %s", status)
 	}
 }

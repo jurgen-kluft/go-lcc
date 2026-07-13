@@ -18,29 +18,29 @@ func NewProgramMemory(externCount, constCount, dataCount, bssCount, frameCapacit
 	return pm
 }
 
-func (memory *ProgramMemory) segmentForAddress(address Address) (*MemorySegment, error) {
+func (memory *ProgramMemory) segmentForAddress(address Address) (*MemorySegment, VMStatus) {
 	segment := address.Segment()
 	if segment <= segmentInvalid || segment >= segmentCount {
-		return nil, ErrInvalidAddressSegment
+		return nil, VMStatusInvalidAddressSegment
 	}
-	return &memory.segment[segment], nil
+	return &memory.segment[segment], VMStatusOK
 }
 
-func (memory *ProgramMemory) ReadBits(address Address, kind ValueKind) (uint64, error) {
-	segment, err := memory.segmentForAddress(address)
-	if err != nil {
-		return 0, err
+func (memory *ProgramMemory) ReadBits(address Address, kind ValueKind) (uint64, VMStatus) {
+	segment, status := memory.segmentForAddress(address)
+	if status != VMStatusOK {
+		return 0, status
 	}
 	return segment.ReadBits(address.Index(), kind)
 }
 
-func (memory *ProgramMemory) WriteBits(address Address, kind ValueKind, bits uint64) error {
+func (memory *ProgramMemory) WriteBits(address Address, kind ValueKind, bits uint64) VMStatus {
 	if address.Segment() == segmentConst {
-		return ErrWriteToConstSegment
+		return VMStatusReadOnlyMemory
 	}
-	segment, err := memory.segmentForAddress(address)
-	if err != nil {
-		return err
+	segment, status := memory.segmentForAddress(address)
+	if status != VMStatusOK {
+		return status
 	}
 	return segment.WriteBits(address.Index(), kind, bits)
 }

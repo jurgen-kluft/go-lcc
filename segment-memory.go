@@ -2,13 +2,6 @@ package cova
 
 import (
 	"encoding/binary"
-	"errors"
-	"fmt"
-)
-
-var (
-	ErrInvalidAddressSegment = errors.New("invalid address segment")
-	ErrWriteToConstSegment   = errors.New("cannot write to const segment")
 )
 
 type Address int
@@ -66,39 +59,39 @@ func NewMemorySegment(size int, capacity int) MemorySegment {
 	return make([]byte, size, capacity)
 }
 
-func (segment MemorySegment) ReadBits(offset int, kind ValueKind) (uint64, error) {
+func (segment MemorySegment) ReadBits(offset int, kind ValueKind) (uint64, VMStatus) {
 	size := kind.Size()
 	if size == 0 {
-		return 0, fmt.Errorf("unsupported value kind %d", kind)
+		return 0, VMStatusInvalidValueKind
 	}
 	if offset < 0 || offset+size > len(segment) {
-		return 0, fmt.Errorf("memory segment offset %d out of range for kind %d", offset, kind)
+		return 0, VMStatusInvalidAddress
 	}
 	switch size {
 	case 1:
-		return uint64(segment[offset]), nil
+		return uint64(segment[offset]), VMStatusOK
 	case 2:
-		return uint64(binary.LittleEndian.Uint16(segment[offset:])), nil
+		return uint64(binary.LittleEndian.Uint16(segment[offset:])), VMStatusOK
 	case 4:
-		return uint64(binary.LittleEndian.Uint32(segment[offset:])), nil
+		return uint64(binary.LittleEndian.Uint32(segment[offset:])), VMStatusOK
 	case 8:
-		return binary.LittleEndian.Uint64(segment[offset:]), nil
+		return binary.LittleEndian.Uint64(segment[offset:]), VMStatusOK
 	default:
-		return 0, fmt.Errorf("unsupported value size %d", size)
+		return 0, VMStatusInvalidValueKind
 	}
 }
 
-func (segment *MemorySegment) WriteBits(offset int, kind ValueKind, bits uint64) error {
+func (segment *MemorySegment) WriteBits(offset int, kind ValueKind, bits uint64) VMStatus {
 	if segment == nil {
-		return fmt.Errorf("memory segment is nil")
+		return VMStatusInvalidAddress
 	}
 	size := kind.Size()
 	if size == 0 {
-		return fmt.Errorf("unsupported value kind %d", kind)
+		return VMStatusInvalidValueKind
 	}
 	bytes := *segment
 	if offset < 0 || offset+size > len(bytes) {
-		return fmt.Errorf("memory segment offset %d out of range for kind %d", offset, kind)
+		return VMStatusInvalidAddress
 	}
 	switch size {
 	case 1:
@@ -110,44 +103,44 @@ func (segment *MemorySegment) WriteBits(offset int, kind ValueKind, bits uint64)
 	case 8:
 		binary.LittleEndian.PutUint64(bytes[offset:], bits)
 	default:
-		return fmt.Errorf("unsupported value size %d", size)
+		return VMStatusInvalidValueKind
 	}
-	return nil
+	return VMStatusOK
 }
 
-func (segment *MemorySegment) AppendBits(kind ValueKind, bits uint64) error {
+func (segment *MemorySegment) AppendBits(kind ValueKind, bits uint64) VMStatus {
 	if segment == nil {
-		return fmt.Errorf("memory segment is nil")
+		return VMStatusInvalidAddress
 	}
 	size := kind.Size()
 	if size == 0 {
-		return fmt.Errorf("unsupported stack value kind %d", kind)
+		return VMStatusInvalidValueKind
 	}
 	base := len(*segment)
 	if size > cap(*segment)-base {
-		return fmt.Errorf("vm error: stack capacity exceeded: need %d bytes, have %d", base+size, cap(*segment))
+		return VMStatusStackOverflow
 	}
 	*segment = (*segment)[:base+size]
 	return segment.WriteBits(base, kind, bits)
 }
 
-func (segment *MemorySegment) TruncateBits(kind ValueKind) (uint64, error) {
+func (segment *MemorySegment) TruncateBits(kind ValueKind) (uint64, VMStatus) {
 	if segment == nil {
-		return 0, fmt.Errorf("memory segment is nil")
+		return 0, VMStatusInvalidAddress
 	}
 	size := kind.Size()
 	if size == 0 {
-		return 0, fmt.Errorf("unsupported stack value kind %d", kind)
+		return 0, VMStatusInvalidValueKind
 	}
 	bytes := *segment
 	if len(bytes) < size {
-		return 0, fmt.Errorf("vm error: stack underflow")
+		return 0, VMStatusStackUnderflow
 	}
 	offset := len(bytes) - size
-	bits, err := MemorySegment(bytes).ReadBits(offset, kind)
-	if err != nil {
-		return 0, err
+	bits, status := MemorySegment(bytes).ReadBits(offset, kind)
+	if status != VMStatusOK {
+		return 0, status
 	}
 	*segment = bytes[:offset]
-	return bits, nil
+	return bits, VMStatusOK
 }

@@ -150,8 +150,8 @@ func runOptimizerTestProgram(t *testing.T, source string, optimize bool) int32 {
 		t.Fatalf("Link failed: %v", err)
 	}
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	if status := vm.Run(linked); status != VMStatusOK {
+		t.Fatalf("Run failed: %s", status)
 	}
 	offset := linked.DebugSymbols.Symbols["result"].ByteOffset
 	return int32(binary.LittleEndian.Uint32(vm.memory.segment[segmentBSS][offset : offset+4]))

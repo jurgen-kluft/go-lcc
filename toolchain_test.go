@@ -140,19 +140,19 @@ void reduce_health(int delta) {
 	linked := mustLinkProgram(t, script, len(externMemory), 1)
 	vm := NewVM(testFrameCapacityBytes)
 	vm.BindExternBlock(externMemory)
-	vm.RegisterExternDispatcher(func(vm *VM, importID int) error {
+	vm.RegisterExternDispatcher(0, func(_ uintptr, vm *VM, importID uint32) VMStatus {
 		if importID != 0 {
 			t.Fatalf("expected import id 0, got %d", importID)
 		}
-		value, err := vm.PopInt32()
-		if err != nil {
-			return err
+		value, status := vm.PopInt32()
+		if status != VMStatusOK {
+			return status
 		}
 		logged = int(value)
-		return nil
+		return VMStatusOK
 	})
-	if err := vm.Run(linked); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	if status := vm.Run(linked); status != VMStatusOK {
+		t.Fatalf("Run failed: %s", status)
 	}
 	if logged != 45 {
 		t.Fatalf("expected logged value 45, got %d", logged)
@@ -177,29 +177,29 @@ void script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 1)
 	vm := NewVM(testFrameCapacityBytes)
-	vm.RegisterExternDispatcher(func(vm *VM, importID int) error {
+	vm.RegisterExternDispatcher(0, func(_ uintptr, vm *VM, importID uint32) VMStatus {
 		if importID != 0 {
 			t.Fatalf("expected import id 0, got %d", importID)
 		}
-		total, err := vm.PopInt64()
-		if err != nil {
-			return err
+		total, status := vm.PopInt64()
+		if status != VMStatusOK {
+			return status
 		}
-		ready, err := vm.PopBool()
-		if err != nil {
-			return err
+		ready, status := vm.PopBool()
+		if status != VMStatusOK {
+			return status
 		}
-		status, err := vm.PopByte()
-		if err != nil {
-			return err
+		statusValue, status := vm.PopByte()
+		if status != VMStatusOK {
+			return status
 		}
-		byteValue = status
+		byteValue = statusValue
 		readyValue = ready
 		totalValue = total
-		return nil
+		return VMStatusOK
 	})
-	if err := vm.Run(linked); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	if status := vm.Run(linked); status != VMStatusOK {
+		t.Fatalf("Run failed: %s", status)
 	}
 	if byteValue != 255 {
 		t.Fatalf("expected byte arg 255, got %d", byteValue)
@@ -225,19 +225,19 @@ void script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 1)
 	vm := NewVM(testFrameCapacityBytes)
-	vm.RegisterExternDispatcher(func(vm *VM, importID int) error {
+	vm.RegisterExternDispatcher(0, func(_ uintptr, vm *VM, importID uint32) VMStatus {
 		if importID != 0 {
 			t.Fatalf("expected import id 0, got %d", importID)
 		}
-		bits, err := vm.PopBits(KindAddress)
-		if err != nil {
-			return err
+		bits, status := vm.PopBits(KindAddress)
+		if status != VMStatusOK {
+			return status
 		}
 		received = Address(uint32(bits))
-		return nil
+		return VMStatusOK
 	})
-	if err := vm.Run(linked); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	if status := vm.Run(linked); status != VMStatusOK {
+		t.Fatalf("Run failed: %s", status)
 	}
 	if received.Segment() != segmentConst {
 		t.Fatalf("expected const segment address, got %s", received.Segment())
@@ -261,19 +261,19 @@ void script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 1)
 	vm := NewVM(testFrameCapacityBytes)
-	vm.RegisterExternDispatcher(func(vm *VM, importID int) error {
+	vm.RegisterExternDispatcher(0, func(_ uintptr, vm *VM, importID uint32) VMStatus {
 		if importID != 0 {
 			t.Fatalf("expected import id 0, got %d", importID)
 		}
-		bits, err := vm.PopBits(KindAddress)
-		if err != nil {
-			return err
+		bits, status := vm.PopBits(KindAddress)
+		if status != VMStatusOK {
+			return status
 		}
 		received = Address(uint32(bits))
-		return nil
+		return VMStatusOK
 	})
-	if err := vm.Run(linked); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	if status := vm.Run(linked); status != VMStatusOK {
+		t.Fatalf("Run failed: %s", status)
 	}
 	if linked.DataByteSize != 4 {
 		t.Fatalf("expected one pointer-sized data global, got %d bytes", linked.DataByteSize)
@@ -398,19 +398,19 @@ void script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 1)
 	vm := NewVM(testFrameCapacityBytes)
-	vm.RegisterExternDispatcher(func(vm *VM, importID int) error {
+	vm.RegisterExternDispatcher(0, func(_ uintptr, vm *VM, importID uint32) VMStatus {
 		if importID != 0 {
 			t.Fatalf("expected import id 0, got %d", importID)
 		}
-		bits, err := vm.PopBits(KindAddress)
-		if err != nil {
-			return err
+		bits, status := vm.PopBits(KindAddress)
+		if status != VMStatusOK {
+			return status
 		}
 		received = append(received, Address(uint32(bits)))
-		return nil
+		return VMStatusOK
 	})
-	if err := vm.Run(linked); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	if status := vm.Run(linked); status != VMStatusOK {
+		t.Fatalf("Run failed: %s", status)
 	}
 	if len(received) != 2 {
 		t.Fatalf("expected 2 received addresses, got %d", len(received))
@@ -442,7 +442,7 @@ int64 bump(int64 amount) {
 	linked := mustLinkProgram(t, script, len(externMemory), 0)
 	vm := NewVM(testFrameCapacityBytes)
 	vm.BindExternBlock(externMemory)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
 	if got := int64(binary.LittleEndian.Uint64(externMemory[0:])); got != 42 {
@@ -476,15 +476,15 @@ void script_main() {
 	linked := mustLinkProgram(t, script, len(externMemory), 1)
 	vm := NewVM(testFrameCapacityBytes)
 	vm.BindExternBlock(externMemory)
-	vm.RegisterExternDispatcher(func(vm *VM, importID int) error {
+	vm.RegisterExternDispatcher(0, func(_ uintptr, vm *VM, importID uint32) VMStatus {
 		if importID != 0 {
 			t.Fatalf("expected import id 0, got %d", importID)
 		}
 		markCalls++
 		return vm.PushInt32(1)
 	})
-	if err := vm.Run(linked); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	if status := vm.Run(linked); status != VMStatusOK {
+		t.Fatalf("Run failed: %s", status)
 	}
 	if markCalls != 0 {
 		t.Fatalf("expected short-circuit to skip host calls, got %d invocations", markCalls)
@@ -533,15 +533,15 @@ void script_main() {
 	linked := mustLinkProgram(t, script, len(externMemory), 1)
 	vm := NewVM(testFrameCapacityBytes)
 	vm.BindExternBlock(externMemory)
-	vm.RegisterExternDispatcher(func(vm *VM, importID int) error {
+	vm.RegisterExternDispatcher(0, func(_ uintptr, vm *VM, importID uint32) VMStatus {
 		if importID != 0 {
 			t.Fatalf("expected import id 0, got %d", importID)
 		}
 		markTrueCalls++
 		return vm.PushInt32(1)
 	})
-	if err := vm.Run(linked); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	if status := vm.Run(linked); status != VMStatusOK {
+		t.Fatalf("Run failed: %s", status)
 	}
 	if markTrueCalls != 2 {
 		t.Fatalf("expected right-hand logical evaluation twice, got %d calls", markTrueCalls)
@@ -575,10 +575,10 @@ int script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if got, err := vm.PopInt32(); err != nil || got != 8 {
+	if got, err := vm.PopInt32(); err != VMStatusOK || got != 8 {
 		t.Fatalf("expected local variable result 8, got %d err=%v", got, err)
 	}
 }
@@ -604,10 +604,10 @@ int script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if got, err := vm.PopInt32(); err != nil || got != 1 {
+	if got, err := vm.PopInt32(); err != VMStatusOK || got != 1 {
 		t.Fatalf("expected outer local value 1 after inner shadowing, got %d err=%v", got, err)
 	}
 }
@@ -654,24 +654,24 @@ void script_main() {
 	linked := mustLinkProgram(t, script, len(externMemory), 2)
 	vm := NewVM(testFrameCapacityBytes)
 	vm.BindExternBlock(externMemory)
-	vm.RegisterExternDispatcher(func(vm *VM, importID int) error {
-		value, err := vm.PopUint64()
-		if err != nil {
-			return err
+	vm.RegisterExternDispatcher(0, func(_ uintptr, vm *VM, importID uint32) VMStatus {
+		value, status := vm.PopUint64()
+		if status != VMStatusOK {
+			return status
 		}
 		switch importID {
 		case 0:
 			seen = value
-			return nil
+			return VMStatusOK
 		case 1:
 			return vm.PushUint64(value)
 		default:
 			t.Fatalf("unexpected import id %d", importID)
-			return nil
+			return VMStatusOK
 		}
 	})
-	if err := vm.Run(linked); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	if status := vm.Run(linked); status != VMStatusOK {
+		t.Fatalf("Run failed: %s", status)
 	}
 	if seen != uint64(1)<<63 {
 		t.Fatalf("expected host arg uint64 0x%x, got 0x%x", uint64(1)<<63, seen)
@@ -695,38 +695,38 @@ uint64 script_main() {
 	linked := mustLinkProgram(t, script, len(externMemory), 0)
 	vm := NewVM(testFrameCapacityBytes)
 	vm.BindExternBlock(externMemory)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if got, err := vm.PopUint64(); err != nil || got != uint64(1)<<63 {
+	if got, err := vm.PopUint64(); err != VMStatusOK || got != uint64(1)<<63 {
 		t.Fatalf("expected uint64 return 0x%x, got 0x%x err=%v", uint64(1)<<63, got, err)
 	}
 }
 
 func TestVMTypedStackHelpersPreserveBits(t *testing.T) {
 	vm := NewVM(8)
-	if err := vm.PushFloat32(3.5); err != nil {
+	if err := vm.PushFloat32(3.5); err != VMStatusOK {
 		t.Fatalf("PushFloat32 failed: %v", err)
 	}
-	if err := vm.PushFloat64(-7.25); err != nil {
+	if err := vm.PushFloat64(-7.25); err != VMStatusOK {
 		t.Fatalf("PushFloat64 failed: %v", err)
 	}
-	if got, err := vm.PopFloat64(); err != nil || got != -7.25 {
+	if got, err := vm.PopFloat64(); err != VMStatusOK || got != -7.25 {
 		t.Fatalf("expected float64 pop -7.25, got %v err=%v", got, err)
 	}
-	if got, err := vm.PopFloat32(); err != nil || got != 3.5 {
+	if got, err := vm.PopFloat32(); err != VMStatusOK || got != 3.5 {
 		t.Fatalf("expected float32 pop 3.5, got %v err=%v", got, err)
 	}
-	if err := vm.PushFloat32(1.25); err != nil {
+	if err := vm.PushFloat32(1.25); err != VMStatusOK {
 		t.Fatalf("PushFloat32 failed: %v", err)
 	}
-	if bits, err := vm.PopBits(KindFloat32); err != nil || bits != uint64(math.Float32bits(1.25)) {
+	if bits, err := vm.PopBits(KindFloat32); err != VMStatusOK || bits != uint64(math.Float32bits(1.25)) {
 		t.Fatalf("expected float32 bits 0x%x, got 0x%x err=%v", math.Float32bits(1.25), bits, err)
 	}
-	if err := vm.PushFloat64(-9.5); err != nil {
+	if err := vm.PushFloat64(-9.5); err != VMStatusOK {
 		t.Fatalf("PushFloat64 failed: %v", err)
 	}
-	if bits, err := vm.PopBits(KindFloat64); err != nil || bits != math.Float64bits(-9.5) {
+	if bits, err := vm.PopBits(KindFloat64); err != VMStatusOK || bits != math.Float64bits(-9.5) {
 		t.Fatalf("expected float64 bits 0x%x, got 0x%x err=%v", math.Float64bits(-9.5), bits, err)
 	}
 }
@@ -746,10 +746,10 @@ func TestRunSupportsFloat64Arithmetic(t *testing.T) {
 	}
 
 	vm := NewVM(8)
-	if err := vm.Run(program); err != nil {
+	if err := vm.Run(program); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if got, err := vm.PopFloat64(); err != nil || got != 3.75 {
+	if got, err := vm.PopFloat64(); err != VMStatusOK || got != 3.75 {
 		t.Fatalf("expected float64 result 3.75, got %v err=%v", got, err)
 	}
 }
@@ -763,10 +763,10 @@ float64 script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if got, err := vm.PopFloat64(); err != nil || got != 3.75 {
+	if got, err := vm.PopFloat64(); err != VMStatusOK || got != 3.75 {
 		t.Fatalf("expected compiled float64 result 3.75, got %v err=%v", got, err)
 	}
 }
@@ -780,10 +780,10 @@ float32 script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if got, err := vm.PopFloat32(); err != nil || got != 0.75 {
+	if got, err := vm.PopFloat32(); err != VMStatusOK || got != 0.75 {
 		t.Fatalf("expected compiled float32 result 0.75, got %v err=%v", got, err)
 	}
 }
@@ -797,10 +797,10 @@ float64 script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if got, err := vm.PopFloat64(); err != nil || got != 0.75 {
+	if got, err := vm.PopFloat64(); err != VMStatusOK || got != 0.75 {
 		t.Fatalf("expected compiled float64 result 0.75, got %v err=%v", got, err)
 	}
 }
@@ -814,10 +814,10 @@ float64 script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if got, err := vm.PopFloat64(); err != nil || got != 3.5 {
+	if got, err := vm.PopFloat64(); err != VMStatusOK || got != 3.5 {
 		t.Fatalf("expected promoted float64 result 3.5, got %v err=%v", got, err)
 	}
 }
@@ -834,10 +834,10 @@ float64 script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if got, err := vm.PopFloat64(); err != nil || got != 3.5 {
+	if got, err := vm.PopFloat64(); err != VMStatusOK || got != 3.5 {
 		t.Fatalf("expected mixed result 3.5, got %v err=%v", got, err)
 	}
 }
@@ -859,10 +859,10 @@ int64 script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if got, err := vm.PopInt64(); err != nil || got != 6 {
+	if got, err := vm.PopInt64(); err != VMStatusOK || got != 6 {
 		t.Fatalf("expected nested call result 6, got %d err=%v", got, err)
 	}
 }
@@ -908,14 +908,14 @@ int script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.LoadProgram(linked); err != nil {
+	if err := vm.LoadProgram(linked); err != VMStatusOK {
 		t.Fatalf("LoadProgram failed: %v", err)
 	}
-	if err := vm.RunLoaded(); err != nil {
+	if err := vm.RunLoaded(); err != VMStatusOK {
 		t.Fatalf("warm-up RunLoaded failed: %v", err)
 	}
 	allocations := testing.AllocsPerRun(100, func() {
-		if err := vm.RunLoaded(); err != nil {
+		if err := vm.RunLoaded(); err != VMStatusOK {
 			panic(err)
 		}
 	})
@@ -937,8 +937,8 @@ int script_main() {
 		StackCapacity:     4,
 		CallFrameCapacity: 8,
 	})
-	if err := vm.Run(linked); err == nil || !strings.Contains(err.Error(), "stack capacity exceeded") {
-		t.Fatalf("expected stack capacity error, got %v", err)
+	if status := vm.Run(linked); status != VMStatusStackOverflow {
+		t.Fatalf("expected stack overflow status, got %s", status)
 	}
 }
 
@@ -956,14 +956,14 @@ int script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.LoadProgram(linked); err != nil {
+	if err := vm.LoadProgram(linked); err != VMStatusOK {
 		t.Fatalf("LoadProgram failed: %v", err)
 	}
 	for run := 0; run < 2; run++ {
-		if err := vm.RunLoaded(); err != nil {
+		if err := vm.RunLoaded(); err != VMStatusOK {
 			t.Fatalf("RunLoaded %d failed: %v", run, err)
 		}
-		if got, err := vm.PopInt32(); err != nil || got != 6 {
+		if got, err := vm.PopInt32(); err != VMStatusOK || got != 6 {
 			t.Fatalf("run %d expected reset result 6, got %d err=%v", run, got, err)
 		}
 	}
@@ -1010,10 +1010,8 @@ int64 script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(linked.FrameByteSize)
-	if err := vm.Run(linked); err == nil {
-		t.Fatal("expected runtime failure for insufficient frame capacity")
-	} else if !strings.Contains(err.Error(), "frame capacity exceeded") {
-		t.Fatalf("expected frame capacity error, got %v", err)
+	if status := vm.Run(linked); status != VMStatusFrameOverflow {
+		t.Fatalf("expected frame overflow status, got %s", status)
 	}
 }
 
@@ -1040,10 +1038,10 @@ func TestRunPreservesNestedUint64ReturnBits(t *testing.T) {
 	}
 
 	vm := NewVM(8)
-	if err := vm.Run(program); err != nil {
+	if err := vm.Run(program); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if got, err := vm.PopUint64(); err != nil || got != uint64(1)<<63 {
+	if got, err := vm.PopUint64(); err != VMStatusOK || got != uint64(1)<<63 {
 		t.Fatalf("expected nested uint64 result 0x%x, got 0x%x err=%v", uint64(1)<<63, got, err)
 	}
 }
@@ -1059,8 +1057,8 @@ func TestOpCallErrorsOnOutOfRangeCodeAddress(t *testing.T) {
 		Functions:  []ScriptFunctionDescriptor{{BodyAddress: 0}},
 	}
 	vm := NewVM(8)
-	if err := vm.Run(program); err == nil {
-		t.Fatal("expected error for out-of-range code address")
+	if status := vm.Run(program); status != VMStatusInvalidTarget {
+		t.Fatalf("expected invalid target status, got %s", status)
 	}
 }
 
@@ -1086,7 +1084,7 @@ void script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
 	counterOffset := linked.DebugSymbols.Symbols["counter"].ByteOffset
@@ -1132,7 +1130,7 @@ void script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
 	counterOffset := linked.DebugSymbols.Symbols["counter"].ByteOffset
@@ -1185,7 +1183,7 @@ void script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
 	totalOffset := linked.DebugSymbols.Symbols["total"].ByteOffset
@@ -1213,7 +1211,7 @@ void script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
 	totalOffset := linked.DebugSymbols.Symbols["total"].ByteOffset
@@ -1266,12 +1264,12 @@ int script_main() {
 
 	linked := mustLinkProgram(t, script, 0, 0)
 	vm := NewVM(testFrameCapacityBytes)
-	if err := vm.Run(linked); err != nil {
+	if err := vm.Run(linked); err != VMStatusOK {
 		t.Fatalf("Run failed: %v", err)
 	}
-	result, err := vm.PopInt32()
-	if err != nil {
-		t.Fatalf("PopInt32 failed: %v", err)
+	result, status := vm.PopInt32()
+	if status != VMStatusOK {
+		t.Fatalf("PopInt32 failed: %s", status)
 	}
 	if result != 10 {
 		t.Fatalf("expected result 10, got %d", result)

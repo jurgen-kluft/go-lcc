@@ -1,9 +1,6 @@
 package cova
 
-import (
-	"fmt"
-	"math"
-)
+import "math"
 
 type callFrame struct {
 	returnPC   int
@@ -15,10 +12,12 @@ type VM struct {
 	memory           ProgramMemory
 	pc               int
 	program          *LinkedProgram
-	externDispatcher ExternDispatcher
+	externDispatcher ExternDispatcherBinding
 	callFrames       []callFrame
 	callFrameTop     int
 	frameTop         int
+	fault            VMFaultInfo
+	instructionPC    int
 }
 
 type VMConfig struct {
@@ -46,8 +45,10 @@ func NewVMWithConfig(config VMConfig) *VM {
 		config.CallFrameCapacity = 1
 	}
 	return &VM{
-		memory:     NewProgramMemory(0, 0, 0, 0, config.FrameCapacity, config.StackCapacity),
-		callFrames: make([]callFrame, config.CallFrameCapacity),
+		memory:        NewProgramMemory(0, 0, 0, 0, config.FrameCapacity, config.StackCapacity),
+		callFrames:    make([]callFrame, config.CallFrameCapacity),
+		fault:         noVMFault(),
+		instructionPC: -1,
 	}
 }
 
@@ -63,8 +64,8 @@ func (vm *VM) LoadExternInt32(offset int) int {
 	if offset < 0 || offset+4 > len(vm.memory.segment[segmentExtern]) {
 		return 0
 	}
-	bits, err := vm.memory.ReadBits(makeAddress(segmentExtern, offset), KindInt32)
-	if err != nil {
+	bits, status := vm.memory.ReadBits(makeAddress(segmentExtern, offset), KindInt32)
+	if status != VMStatusOK {
 		return 0
 	}
 	return int(int32(bits))
@@ -77,147 +78,152 @@ func (vm *VM) StoreExternInt32(offset int, value int) {
 	_ = vm.memory.WriteBits(makeAddress(segmentExtern, offset), KindInt32, uint64(uint32(int32(value))))
 }
 
-func (vm *VM) RegisterExternDispatcher(dispatcher ExternDispatcher) {
-	vm.externDispatcher = dispatcher
+func (vm *VM) RegisterExternDispatcher(hostContext uintptr, dispatcher ExternDispatcher) {
+	vm.externDispatcher = ExternDispatcherBinding{HostContext: hostContext, Dispatcher: dispatcher}
 }
 
-func (vm *VM) PushBits(kind ValueKind, bits uint64) error {
+func (vm *VM) FaultInfo() VMFaultInfo {
+	return vm.fault
+}
+
+func (vm *VM) PushBits(kind ValueKind, bits uint64) VMStatus {
 	return vm.pushKind(kind, bits)
 }
 
-func (vm *VM) PushBool(value bool) error {
+func (vm *VM) PushBool(value bool) VMStatus {
 	if value {
 		return vm.pushKind(KindBool, 1)
 	}
 	return vm.pushKind(KindBool, 0)
 }
 
-func (vm *VM) PushByte(value byte) error {
+func (vm *VM) PushByte(value byte) VMStatus {
 	return vm.pushKind(KindByte, uint64(value))
 }
 
-func (vm *VM) PushInt8(value int8) error {
+func (vm *VM) PushInt8(value int8) VMStatus {
 	return vm.pushKind(KindInt8, uint64(uint8(value)))
 }
 
-func (vm *VM) PushInt16(value int16) error {
+func (vm *VM) PushInt16(value int16) VMStatus {
 	return vm.pushKind(KindInt16, uint64(uint16(value)))
 }
 
-func (vm *VM) PushInt32(value int32) error {
+func (vm *VM) PushInt32(value int32) VMStatus {
 	return vm.pushKind(KindInt32, uint64(uint32(value)))
 }
 
-func (vm *VM) PushInt64(value int64) error {
+func (vm *VM) PushInt64(value int64) VMStatus {
 	return vm.pushKind(KindInt64, uint64(value))
 }
 
-func (vm *VM) PushUint8(value uint8) error {
+func (vm *VM) PushUint8(value uint8) VMStatus {
 	return vm.pushKind(KindUint8, uint64(value))
 }
 
-func (vm *VM) PushUint16(value uint16) error {
+func (vm *VM) PushUint16(value uint16) VMStatus {
 	return vm.pushKind(KindUint16, uint64(value))
 }
 
-func (vm *VM) PushUint32(value uint32) error {
+func (vm *VM) PushUint32(value uint32) VMStatus {
 	return vm.pushKind(KindUint32, uint64(value))
 }
 
-func (vm *VM) PushUint64(value uint64) error {
+func (vm *VM) PushUint64(value uint64) VMStatus {
 	return vm.pushKind(KindUint64, value)
 }
 
-func (vm *VM) PushFloat32(value float32) error {
+func (vm *VM) PushFloat32(value float32) VMStatus {
 	return vm.pushKind(KindFloat32, uint64(math.Float32bits(value)))
 }
 
-func (vm *VM) PushFloat64(value float64) error {
+func (vm *VM) PushFloat64(value float64) VMStatus {
 	return vm.pushKind(KindFloat64, math.Float64bits(value))
 }
 
-func (vm *VM) PopBits(kind ValueKind) (uint64, error) {
+func (vm *VM) PopBits(kind ValueKind) (uint64, VMStatus) {
 	return vm.popKind(kind)
 }
 
-func (vm *VM) PopBool() (bool, error) {
-	bits, err := vm.popKind(KindBool)
-	return bits != 0, err
+func (vm *VM) PopBool() (bool, VMStatus) {
+	bits, status := vm.popKind(KindBool)
+	return bits != 0, status
 }
 
-func (vm *VM) PopByte() (byte, error) {
-	bits, err := vm.popKind(KindByte)
-	return byte(bits), err
+func (vm *VM) PopByte() (byte, VMStatus) {
+	bits, status := vm.popKind(KindByte)
+	return byte(bits), status
 }
 
-func (vm *VM) PopInt8() (int8, error) {
-	bits, err := vm.popKind(KindInt8)
-	return int8(bits), err
+func (vm *VM) PopInt8() (int8, VMStatus) {
+	bits, status := vm.popKind(KindInt8)
+	return int8(bits), status
 }
 
-func (vm *VM) PopInt16() (int16, error) {
-	bits, err := vm.popKind(KindInt16)
-	return int16(bits), err
+func (vm *VM) PopInt16() (int16, VMStatus) {
+	bits, status := vm.popKind(KindInt16)
+	return int16(bits), status
 }
 
-func (vm *VM) PopInt32() (int32, error) {
-	bits, err := vm.popKind(KindInt32)
-	return int32(bits), err
+func (vm *VM) PopInt32() (int32, VMStatus) {
+	bits, status := vm.popKind(KindInt32)
+	return int32(bits), status
 }
 
-func (vm *VM) PopInt64() (int64, error) {
-	bits, err := vm.popKind(KindInt64)
-	return int64(bits), err
+func (vm *VM) PopInt64() (int64, VMStatus) {
+	bits, status := vm.popKind(KindInt64)
+	return int64(bits), status
 }
 
-func (vm *VM) PopUint8() (uint8, error) {
-	bits, err := vm.popKind(KindUint8)
-	return uint8(bits), err
+func (vm *VM) PopUint8() (uint8, VMStatus) {
+	bits, status := vm.popKind(KindUint8)
+	return uint8(bits), status
 }
 
-func (vm *VM) PopUint16() (uint16, error) {
-	bits, err := vm.popKind(KindUint16)
-	return uint16(bits), err
+func (vm *VM) PopUint16() (uint16, VMStatus) {
+	bits, status := vm.popKind(KindUint16)
+	return uint16(bits), status
 }
 
-func (vm *VM) PopUint32() (uint32, error) {
-	bits, err := vm.popKind(KindUint32)
-	return uint32(bits), err
+func (vm *VM) PopUint32() (uint32, VMStatus) {
+	bits, status := vm.popKind(KindUint32)
+	return uint32(bits), status
 }
 
-func (vm *VM) PopUint64() (uint64, error) {
+func (vm *VM) PopUint64() (uint64, VMStatus) {
 	return vm.popKind(KindUint64)
 }
 
-func (vm *VM) PopFloat32() (float32, error) {
-	bits, err := vm.popKind(KindFloat32)
-	return math.Float32frombits(uint32(bits)), err
+func (vm *VM) PopFloat32() (float32, VMStatus) {
+	bits, status := vm.popKind(KindFloat32)
+	return math.Float32frombits(uint32(bits)), status
 }
 
-func (vm *VM) PopFloat64() (float64, error) {
-	bits, err := vm.popKind(KindFloat64)
-	return math.Float64frombits(bits), err
+func (vm *VM) PopFloat64() (float64, VMStatus) {
+	bits, status := vm.popKind(KindFloat64)
+	return math.Float64frombits(bits), status
 }
 
-func (vm *VM) Run(program *LinkedProgram) error {
-	if err := vm.LoadProgram(program); err != nil {
-		return err
+func (vm *VM) Run(program *LinkedProgram) VMStatus {
+	if status := vm.LoadProgram(program); status != VMStatusOK {
+		return status
 	}
 	return vm.RunLoaded()
 }
 
-func (vm *VM) LoadProgram(program *LinkedProgram) error {
+func (vm *VM) LoadProgram(program *LinkedProgram) VMStatus {
+	vm.clearFault()
 	if program == nil {
-		return fmt.Errorf("vm error: linked program is nil")
+		return vm.fail(VMStatusInvalidProgram, -1, -1, -1)
 	}
 	if program.BSSByteSize < 0 {
-		return fmt.Errorf("vm error: invalid bss byte size %d", program.BSSByteSize)
+		return vm.fail(VMStatusInvalidProgram, program.BSSByteSize, 0, -1)
 	}
 	if program.ConstByteSize < 0 || program.ConstByteSize != len(program.ConstData) {
-		return fmt.Errorf("vm error: const image size mismatch: declared %d, got %d", program.ConstByteSize, len(program.ConstData))
+		return vm.fail(VMStatusInvalidImage, -1, program.ConstByteSize, len(program.ConstData))
 	}
 	if program.DataByteSize < 0 || program.DataByteSize != len(program.DataData) {
-		return fmt.Errorf("vm error: data image size mismatch: declared %d, got %d", program.DataByteSize, len(program.DataData))
+		return vm.fail(VMStatusInvalidImage, -1, program.DataByteSize, len(program.DataData))
 	}
 	if len(vm.memory.segment[segmentBSS]) != program.BSSByteSize {
 		vm.memory.segment[segmentBSS] = make([]byte, program.BSSByteSize)
@@ -227,12 +233,13 @@ func (vm *VM) LoadProgram(program *LinkedProgram) error {
 	}
 	vm.memory.segment[segmentConst] = MemorySegment(program.ConstData)
 	vm.program = program
-	return nil
+	return VMStatusOK
 }
 
-func (vm *VM) Reset() error {
+func (vm *VM) Reset() VMStatus {
+	vm.clearFault()
 	if vm.program == nil {
-		return fmt.Errorf("vm error: no linked program loaded")
+		return vm.fail(VMStatusNoProgramLoaded, -1, -1, -1)
 	}
 	program := vm.program
 	for index := range vm.memory.segment[segmentBSS] {
@@ -248,26 +255,27 @@ func (vm *VM) Reset() error {
 	vm.frameTop = 0
 
 	if program.EntryPoint < 0 || program.EntryPoint >= len(program.Functions) {
-		return fmt.Errorf("vm error: entry point %d out of range", program.EntryPoint)
+		return vm.fail(VMStatusInvalidTarget, program.EntryPoint, len(program.Functions), len(program.Functions))
 	}
 	if program.Functions[program.EntryPoint].ParamCount != 0 {
-		return fmt.Errorf("vm error: entry function expects %d args", program.Functions[program.EntryPoint].ParamCount)
+		return vm.fail(VMStatusInvalidDescriptor, program.EntryPoint, 0, program.Functions[program.EntryPoint].ParamCount)
 	}
-	if err := vm.enterScriptFunction(program.EntryPoint, -1, false); err != nil {
-		return err
+	if status := vm.enterScriptFunction(program.EntryPoint, -1, false); status != VMStatusOK {
+		return vm.recordStatus(status)
 	}
-	return nil
+	return VMStatusOK
 }
 
-func (vm *VM) RunLoaded() error {
-	if err := vm.Reset(); err != nil {
-		return err
+func (vm *VM) RunLoaded() VMStatus {
+	if status := vm.Reset(); status != VMStatusOK {
+		return status
 	}
 	program := vm.program
 	for vm.pc < len(program.Text) {
-		instruction, err := program.Text.ReadInstructionChecked(&vm.pc)
-		if err != nil {
-			return err
+		vm.instructionPC = vm.pc
+		instruction, status := program.Text.ReadInstructionChecked(&vm.pc)
+		if status != VMStatusOK {
+			return vm.recordStatus(status)
 		}
 		op := instruction.Opcode()
 
@@ -275,209 +283,233 @@ func (vm *VM) RunLoaded() error {
 		case OpPush:
 			kind := instruction.Kind()
 			if kind == KindNone || kind == KindAddress {
-				return fmt.Errorf("vm error: unsupported push kind %d", kind)
+				return vm.fail(VMStatusInvalidValueKind, int(kind), -1, -1)
 			}
-			immediate, err := program.Text.ReadImmediateChecked(&vm.pc, kind)
-			if err != nil {
-				return err
+			immediate, status := program.Text.ReadImmediateChecked(&vm.pc, kind)
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
-			if err := vm.pushKind(kind, immediate); err != nil {
-				return err
+			if status = vm.pushKind(kind, immediate); status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 		case OpArithmetic:
 			kind := instruction.Kind()
 			arithmeticOp := instruction.ArithmeticOp()
-			right, left, err := vm.popBinary(kind)
-			if err != nil {
-				return err
+			right, left, status := vm.popBinary(kind)
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
-			result, err := vm.executeArithmetic(kind, arithmeticOp, left, right)
-			if err != nil {
-				return err
+			result, status := vm.executeArithmetic(kind, arithmeticOp, left, right)
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
-			if err := vm.pushKind(kind, result); err != nil {
-				return err
+			if status = vm.pushKind(kind, result); status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 		case OpConvert:
 			fromKind := instruction.ConvertFromKind()
-			bits, err := vm.popKind(fromKind)
-			if err != nil {
-				return err
+			bits, status := vm.popKind(fromKind)
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 			kind := instruction.Kind()
-			if err := vm.pushKind(kind, convertBits(fromKind, kind, bits)); err != nil {
-				return err
+			if status = vm.pushKind(kind, convertBits(fromKind, kind, bits)); status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 		case OpAddr:
 			segment := instruction.AddressSegment()
-			offset, err := program.Text.ReadIntChecked(&vm.pc)
-			if err != nil {
-				return err
+			offset, status := program.Text.ReadIntChecked(&vm.pc)
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 			if segment == segmentFrame {
-				frame, err := vm.currentFrame()
-				if err != nil {
-					return err
+				frame, frameStatus := vm.currentFrame()
+				if frameStatus != VMStatusOK {
+					return vm.recordStatus(frameStatus)
 				}
 				offset += frame.localBase
 			}
-			if err := vm.pushAddress(makeAddress(segment, offset)); err != nil {
-				return err
+			if status = vm.pushAddress(makeAddress(segment, offset)); status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 		case OpOffset:
-			offset, err := vm.popInt32()
-			if err != nil {
-				return err
+			offset, status := vm.popInt32()
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
-			base, err := vm.popAddress()
-			if err != nil {
-				return err
+			base, status := vm.popAddress()
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
-			if err := vm.pushAddress(makeAddress(base.Segment(), base.Index()+offset)); err != nil {
-				return err
+			if status = vm.pushAddress(makeAddress(base.Segment(), base.Index()+offset)); status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 		case OpDereference:
 			kind := instruction.Kind()
 			if kind == KindNone {
-				return fmt.Errorf("vm error: unsupported dereference kind %d", kind)
+				return vm.fail(VMStatusInvalidValueKind, int(kind), -1, -1)
 			}
-			encodedAddress, err := vm.popAddress()
-			if err != nil {
-				return err
+			encodedAddress, status := vm.popAddress()
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
-			value, err := vm.memory.ReadBits(encodedAddress, kind)
-			if err != nil {
-				return err
+			value, status := vm.memory.ReadBits(encodedAddress, kind)
+			if status != VMStatusOK {
+				return vm.fail(status, int(encodedAddress), -1, -1)
 			}
-			if err := vm.pushKind(kind, value); err != nil {
-				return err
+			if status = vm.pushKind(kind, value); status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 		case OpAssign:
 			kind := instruction.Kind()
 			if kind == KindNone {
-				return fmt.Errorf("vm error: unsupported assign kind %d", kind)
+				return vm.fail(VMStatusInvalidValueKind, int(kind), -1, -1)
 			}
-			encodedAddress, err := vm.popAddress()
-			if err != nil {
-				return err
+			encodedAddress, status := vm.popAddress()
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
-			value, err := vm.popKind(kind)
-			if err != nil {
-				return err
+			value, status := vm.popKind(kind)
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
-			if err := vm.memory.WriteBits(encodedAddress, kind, value); err != nil {
-				return err
+			if status = vm.memory.WriteBits(encodedAddress, kind, value); status != VMStatusOK {
+				return vm.fail(status, int(encodedAddress), -1, -1)
 			}
 		case OpCompare:
 			kind := instruction.Kind()
 			compareOp := instruction.CompareOp()
-			right, left, err := vm.popBinary(kind)
-			if err != nil {
-				return err
+			right, left, status := vm.popBinary(kind)
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 			result := vm.executeComparison(kind, compareOp, left, right)
-			if err := vm.PushInt32(result); err != nil {
-				return err
+			if status = vm.PushInt32(result); status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 		case OpJumpIfFalse:
-			target, err := program.Text.ReadIntChecked(&vm.pc)
-			if err != nil {
-				return err
+			target, status := program.Text.ReadIntChecked(&vm.pc)
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
-			condition, err := vm.popInt32()
-			if err != nil {
-				return err
+			condition, status := vm.popInt32()
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 			if condition == 0 {
 				if target < 0 || target >= len(program.Text) {
-					return fmt.Errorf("vm error: jump target %d out of range", target)
+					return vm.fail(VMStatusInvalidTarget, target, len(program.Text), len(program.Text))
 				}
 				vm.pc = target
 			}
 		case OpJump:
-			target, err := program.Text.ReadIntChecked(&vm.pc)
-			if err != nil {
-				return err
+			target, status := program.Text.ReadIntChecked(&vm.pc)
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 			if target < 0 || target >= len(program.Text) {
-				return fmt.Errorf("vm error: jump target %d out of range", target)
+				return vm.fail(VMStatusInvalidTarget, target, len(program.Text), len(program.Text))
 			}
 			vm.pc = target
 		case OpCall:
-			target, err := program.Text.ReadIntChecked(&vm.pc)
-			if err != nil {
-				return err
+			target, status := program.Text.ReadIntChecked(&vm.pc)
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
-			if err := vm.callScriptFunction(target); err != nil {
-				return err
+			if status = vm.callScriptFunction(target); status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 		case OpCallExtern:
-			importID, err := program.Text.ReadIntChecked(&vm.pc)
-			if err != nil {
-				return err
+			importID, status := program.Text.ReadIntChecked(&vm.pc)
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
-			if err := vm.callExtern(importID); err != nil {
-				return err
+			if status = vm.callExtern(importID); status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 		case OpRet:
-			done, err := vm.returnFromFunction()
-			if err != nil {
-				return err
+			done, status := vm.returnFromFunction()
+			if status != VMStatusOK {
+				return vm.recordStatus(status)
 			}
 			if done {
-				return nil
+				return VMStatusOK
 			}
 		default:
-			return fmt.Errorf("vm error: unknown opcode %d at ip %d", op, vm.pc-2)
+			return vm.fail(VMStatusInvalidOpcode, int(op), -1, -1)
 		}
 	}
 
-	return nil
+	return VMStatusOK
 }
 
-func (vm *VM) currentFrame() (*callFrame, error) {
-	if vm.callFrameTop == 0 {
-		return nil, fmt.Errorf("vm error: no active call frame")
+func (vm *VM) clearFault() {
+	vm.fault = noVMFault()
+	vm.instructionPC = -1
+}
+
+func (vm *VM) fail(status VMStatus, target, required, available int) VMStatus {
+	vm.fault = VMFaultInfo{
+		Status:     status,
+		PC:         vm.instructionPC,
+		Target:     target,
+		Required:   required,
+		Available:  available,
+		HostStatus: VMStatusOK,
 	}
-	return &vm.callFrames[vm.callFrameTop-1], nil
+	return status
 }
 
-func (vm *VM) enterScriptFunction(functionIndex int, returnPC int, popArgs bool) error {
+func (vm *VM) recordStatus(status VMStatus) VMStatus {
+	if status != VMStatusOK && vm.fault.Status == VMStatusOK {
+		return vm.fail(status, -1, -1, -1)
+	}
+	return status
+}
+
+func (vm *VM) currentFrame() (*callFrame, VMStatus) {
+	if vm.callFrameTop == 0 {
+		return nil, VMStatusInvalidLifecycle
+	}
+	return &vm.callFrames[vm.callFrameTop-1], VMStatusOK
+}
+
+func (vm *VM) enterScriptFunction(functionIndex int, returnPC int, popArgs bool) VMStatus {
 	if functionIndex < 0 || functionIndex >= len(vm.program.Functions) {
-		return fmt.Errorf("vm error: function index %d out of range", functionIndex)
+		return vm.fail(VMStatusInvalidTarget, functionIndex, len(vm.program.Functions), len(vm.program.Functions))
 	}
 	function := vm.program.Functions[functionIndex]
 	if function.BodyAddress < 0 || function.BodyAddress >= len(vm.program.Text) {
-		return fmt.Errorf("vm error: function %d body address %d out of range", functionIndex, function.BodyAddress)
+		return vm.fail(VMStatusInvalidDescriptor, functionIndex, len(vm.program.Text), function.BodyAddress)
 	}
 	if function.ParamStart < 0 || function.ParamCount < 0 || function.ParamStart > len(vm.program.ParamKinds)-function.ParamCount || function.ParamStart > len(vm.program.ParamOffsets)-function.ParamCount {
-		return fmt.Errorf("vm error: function %d has invalid parameter metadata", functionIndex)
+		return vm.fail(VMStatusInvalidParameter, functionIndex, function.ParamCount, len(vm.program.ParamKinds))
 	}
 	if function.FrameByteSize < 0 {
-		return fmt.Errorf("vm error: function %d has invalid frame byte size %d", functionIndex, function.FrameByteSize)
+		return vm.fail(VMStatusInvalidDescriptor, functionIndex, 0, function.FrameByteSize)
 	}
 	argumentBytes := 0
 	for index := 0; index < function.ParamCount; index++ {
 		kind := vm.program.ParamKinds[function.ParamStart+index]
 		size := kind.Size()
 		if size == 0 {
-			return fmt.Errorf("vm error: function %d parameter %d has invalid kind %d", functionIndex, index, kind)
+			return vm.fail(VMStatusInvalidParameter, index, -1, int(kind))
 		}
 		offset := vm.program.ParamOffsets[function.ParamStart+index]
 		if offset < 0 || offset > function.FrameByteSize-size {
-			return fmt.Errorf("vm error: function %d parameter %d offset %d out of range", functionIndex, index, offset)
+			return vm.fail(VMStatusInvalidParameter, index, function.FrameByteSize, offset+size)
 		}
 		argumentBytes += size
 	}
 	if popArgs && argumentBytes > len(vm.memory.segment[segmentStack]) {
-		return fmt.Errorf("vm error: stack underflow")
+		return vm.fail(VMStatusStackUnderflow, functionIndex, argumentBytes, len(vm.memory.segment[segmentStack]))
 	}
 	localBase := vm.frameTop
 	if localBase+function.FrameByteSize > len(vm.memory.segment[segmentFrame]) {
-		return fmt.Errorf("vm error: frame capacity exceeded: need %d bytes, have %d", localBase+function.FrameByteSize, len(vm.memory.segment[segmentFrame]))
+		return vm.fail(VMStatusFrameOverflow, functionIndex, localBase+function.FrameByteSize, len(vm.memory.segment[segmentFrame]))
 	}
 	if vm.callFrameTop >= len(vm.callFrames) {
-		return fmt.Errorf("vm error: call frame capacity exceeded: need %d frames, have %d", vm.callFrameTop+1, len(vm.callFrames))
+		return vm.fail(VMStatusCallFrameOverflow, functionIndex, vm.callFrameTop+1, len(vm.callFrames))
 	}
 	for offset := localBase; offset < localBase+function.FrameByteSize; offset++ {
 		vm.memory.segment[segmentFrame][offset] = 0
@@ -486,12 +518,12 @@ func (vm *VM) enterScriptFunction(functionIndex int, returnPC int, popArgs bool)
 		for index := function.ParamCount - 1; index >= 0; index-- {
 			paramIndex := function.ParamStart + index
 			kind := vm.program.ParamKinds[paramIndex]
-			value, err := vm.popKind(kind)
-			if err != nil {
-				return err
+			value, status := vm.popKind(kind)
+			if status != VMStatusOK {
+				return status
 			}
-			if err := vm.memory.WriteBits(makeAddress(segmentFrame, localBase+vm.program.ParamOffsets[paramIndex]), kind, value); err != nil {
-				return err
+			if status = vm.memory.WriteBits(makeAddress(segmentFrame, localBase+vm.program.ParamOffsets[paramIndex]), kind, value); status != VMStatusOK {
+				return status
 			}
 		}
 	}
@@ -499,114 +531,141 @@ func (vm *VM) enterScriptFunction(functionIndex int, returnPC int, popArgs bool)
 	vm.callFrames[vm.callFrameTop] = callFrame{returnPC: returnPC, localBase: localBase, returnKind: function.ReturnKind}
 	vm.callFrameTop++
 	vm.pc = function.BodyAddress
-	return nil
+	return VMStatusOK
 }
 
-func (vm *VM) callScriptFunction(functionIndex int) error {
+func (vm *VM) callScriptFunction(functionIndex int) VMStatus {
 	return vm.enterScriptFunction(functionIndex, vm.pc, true)
 }
 
-func (vm *VM) callExtern(importID int) error {
-	if vm.externDispatcher == nil {
-		return fmt.Errorf("vm error: no extern dispatcher registered for import %d", importID)
+func (vm *VM) callExtern(importID int) VMStatus {
+	if importID < 0 {
+		return vm.fail(VMStatusInvalidTarget, importID, 0, importID)
 	}
-	return vm.externDispatcher(vm, importID)
+	if vm.externDispatcher.Dispatcher == nil {
+		return vm.fail(VMStatusMissingExtern, importID, -1, -1)
+	}
+	hostStatus := vm.externDispatcher.Dispatcher(vm.externDispatcher.HostContext, vm, uint32(importID))
+	if hostStatus != VMStatusOK {
+		vm.fault = VMFaultInfo{
+			Status:     VMStatusHostFailure,
+			PC:         vm.instructionPC,
+			Target:     importID,
+			Required:   -1,
+			Available:  -1,
+			HostStatus: hostStatus,
+		}
+		return VMStatusHostFailure
+	}
+	return VMStatusOK
 }
 
-func (vm *VM) returnFromFunction() (bool, error) {
+func (vm *VM) returnFromFunction() (bool, VMStatus) {
 	if vm.callFrameTop == 0 {
-		return false, fmt.Errorf("vm error: return without active frame")
+		return false, VMStatusInvalidLifecycle
 	}
 	vm.callFrameTop--
 	frame := vm.callFrames[vm.callFrameTop]
 	var resultBits uint64
 	if hasStackValueKind(frame.returnKind) {
-		value, err := vm.popKind(frame.returnKind)
-		if err != nil {
-			return false, err
+		value, status := vm.popKind(frame.returnKind)
+		if status != VMStatusOK {
+			return false, status
 		}
 		resultBits = value
 	}
 	vm.frameTop = frame.localBase
 	if vm.callFrameTop == 0 {
 		if hasStackValueKind(frame.returnKind) {
-			if err := vm.pushKind(frame.returnKind, resultBits); err != nil {
-				return false, err
+			if status := vm.pushKind(frame.returnKind, resultBits); status != VMStatusOK {
+				return false, status
 			}
 		}
-		return true, nil
+		return true, VMStatusOK
 	}
 	vm.pc = frame.returnPC
 	if hasStackValueKind(frame.returnKind) {
-		if err := vm.pushKind(frame.returnKind, resultBits); err != nil {
-			return false, err
+		if status := vm.pushKind(frame.returnKind, resultBits); status != VMStatusOK {
+			return false, status
 		}
 	}
-	return false, nil
+	return false, VMStatusOK
 }
 
 func hasStackValueKind(kind ValueKind) bool {
 	return kind != KindNone && kind != KindVoid
 }
 
-func (vm *VM) pushKind(kind ValueKind, bits uint64) error {
-	return appendStackBits(&vm.memory.segment[segmentStack], kind, bits)
+func (vm *VM) pushKind(kind ValueKind, bits uint64) VMStatus {
+	status := appendStackBits(&vm.memory.segment[segmentStack], kind, bits)
+	if status == VMStatusStackOverflow {
+		return vm.fail(status, -1, len(vm.memory.segment[segmentStack])+kind.Size(), cap(vm.memory.segment[segmentStack]))
+	}
+	return vm.recordStatus(status)
 }
 
 func (vm *VM) pushInt32(value int) {
 	_ = appendStackBits(&vm.memory.segment[segmentStack], KindInt32, uint64(uint32(int32(value))))
 }
 
-func (vm *VM) pushAddress(address Address) error {
+func (vm *VM) pushAddress(address Address) VMStatus {
 	return appendAddress(&vm.memory.segment[segmentStack], address)
 }
 
-func (vm *VM) popInt32() (int, error) {
-	bits, err := truncateStackBits(&vm.memory.segment[segmentStack], KindInt32)
-	if err != nil {
-		return 0, err
+func (vm *VM) popInt32() (int, VMStatus) {
+	bits, status := truncateStackBits(&vm.memory.segment[segmentStack], KindInt32)
+	if status != VMStatusOK {
+		return 0, vm.recordStatus(status)
 	}
-	return int(int32(bits)), nil
+	return int(int32(bits)), VMStatusOK
 }
 
-func (vm *VM) popAddress() (Address, error) {
-	bits, err := truncateStackBits(&vm.memory.segment[segmentStack], KindAddress)
-	if err != nil {
-		return 0, err
+func (vm *VM) popAddress() (Address, VMStatus) {
+	bits, status := truncateStackBits(&vm.memory.segment[segmentStack], KindAddress)
+	if status != VMStatusOK {
+		return 0, vm.recordStatus(status)
 	}
-	return Address(uint32(bits)), nil
+	return Address(uint32(bits)), VMStatusOK
 }
 
-func (vm *VM) popKind(kind ValueKind) (uint64, error) {
-	return truncateStackBits(&vm.memory.segment[segmentStack], kind)
+func (vm *VM) popKind(kind ValueKind) (uint64, VMStatus) {
+	bits, status := truncateStackBits(&vm.memory.segment[segmentStack], kind)
+	if status != VMStatusOK {
+		return 0, vm.recordStatus(status)
+	}
+	return bits, VMStatusOK
 }
 
-func (vm *VM) popBinary(kind ValueKind) (right uint64, left uint64, err error) {
-	return popBinaryBits(&vm.memory.segment[segmentStack], kind)
+func (vm *VM) popBinary(kind ValueKind) (right uint64, left uint64, status VMStatus) {
+	right, left, status = popBinaryBits(&vm.memory.segment[segmentStack], kind)
+	if status != VMStatusOK {
+		status = vm.recordStatus(status)
+	}
+	return right, left, status
 }
 
-func appendStackBits(stack *MemorySegment, kind ValueKind, bits uint64) error {
+func appendStackBits(stack *MemorySegment, kind ValueKind, bits uint64) VMStatus {
 	return stack.AppendBits(kind, bits)
 }
 
-func truncateStackBits(stack *MemorySegment, kind ValueKind) (uint64, error) {
+func truncateStackBits(stack *MemorySegment, kind ValueKind) (uint64, VMStatus) {
 	return stack.TruncateBits(kind)
 }
 
-func appendAddress(stack *MemorySegment, address Address) error {
+func appendAddress(stack *MemorySegment, address Address) VMStatus {
 	return appendStackBits(stack, KindAddress, uint64(uint32(address)))
 }
 
-func popBinaryBits(stack *MemorySegment, kind ValueKind) (right uint64, left uint64, err error) {
-	right, err = truncateStackBits(stack, kind)
-	if err != nil {
-		return 0, 0, err
+func popBinaryBits(stack *MemorySegment, kind ValueKind) (right uint64, left uint64, status VMStatus) {
+	right, status = truncateStackBits(stack, kind)
+	if status != VMStatusOK {
+		return 0, 0, status
 	}
-	left, err = truncateStackBits(stack, kind)
-	if err != nil {
-		return 0, 0, err
+	left, status = truncateStackBits(stack, kind)
+	if status != VMStatusOK {
+		return 0, 0, status
 	}
-	return right, left, nil
+	return right, left, VMStatusOK
 }
 
 func (vm *VM) isZero(kind ValueKind, bits uint64) bool {
@@ -620,119 +679,119 @@ func (vm *VM) isZero(kind ValueKind, bits uint64) bool {
 	}
 }
 
-func (vm *VM) executeArithmetic(kind ValueKind, op ArithmeticOp, left uint64, right uint64) (uint64, error) {
+func (vm *VM) executeArithmetic(kind ValueKind, op ArithmeticOp, left uint64, right uint64) (uint64, VMStatus) {
 	switch kind {
 	case KindBool, KindByte, KindUint8, KindUint16, KindUint32, KindUint64:
 		switch op {
 		case ArithmeticAdd:
-			return left + right, nil
+			return left + right, VMStatusOK
 		case ArithmeticSub:
-			return left - right, nil
+			return left - right, VMStatusOK
 		case ArithmeticMul:
-			return left * right, nil
+			return left * right, VMStatusOK
 		case ArithmeticDiv:
 			if vm.isZero(kind, right) {
-				return 0, fmt.Errorf("vm error: division by zero")
+				return 0, VMStatusDivisionByZero
 			}
-			return left / right, nil
+			return left / right, VMStatusOK
 		}
 	case KindInt8:
 		leftValue, rightValue := int8(left), int8(right)
 		switch op {
 		case ArithmeticAdd:
-			return uint64(uint8(leftValue + rightValue)), nil
+			return uint64(uint8(leftValue + rightValue)), VMStatusOK
 		case ArithmeticSub:
-			return uint64(uint8(leftValue - rightValue)), nil
+			return uint64(uint8(leftValue - rightValue)), VMStatusOK
 		case ArithmeticMul:
-			return uint64(uint8(leftValue * rightValue)), nil
+			return uint64(uint8(leftValue * rightValue)), VMStatusOK
 		case ArithmeticDiv:
 			if vm.isZero(kind, right) {
-				return 0, fmt.Errorf("vm error: division by zero")
+				return 0, VMStatusDivisionByZero
 			}
-			return uint64(uint8(leftValue / rightValue)), nil
+			return uint64(uint8(leftValue / rightValue)), VMStatusOK
 		}
 	case KindInt16:
 		leftValue, rightValue := int16(left), int16(right)
 		switch op {
 		case ArithmeticAdd:
-			return uint64(uint16(leftValue + rightValue)), nil
+			return uint64(uint16(leftValue + rightValue)), VMStatusOK
 		case ArithmeticSub:
-			return uint64(uint16(leftValue - rightValue)), nil
+			return uint64(uint16(leftValue - rightValue)), VMStatusOK
 		case ArithmeticMul:
-			return uint64(uint16(leftValue * rightValue)), nil
+			return uint64(uint16(leftValue * rightValue)), VMStatusOK
 		case ArithmeticDiv:
 			if vm.isZero(kind, right) {
-				return 0, fmt.Errorf("vm error: division by zero")
+				return 0, VMStatusDivisionByZero
 			}
-			return uint64(uint16(leftValue / rightValue)), nil
+			return uint64(uint16(leftValue / rightValue)), VMStatusOK
 		}
 	case KindInt64:
 		leftValue, rightValue := int64(left), int64(right)
 		switch op {
 		case ArithmeticAdd:
-			return uint64(leftValue + rightValue), nil
+			return uint64(leftValue + rightValue), VMStatusOK
 		case ArithmeticSub:
-			return uint64(leftValue - rightValue), nil
+			return uint64(leftValue - rightValue), VMStatusOK
 		case ArithmeticMul:
-			return uint64(leftValue * rightValue), nil
+			return uint64(leftValue * rightValue), VMStatusOK
 		case ArithmeticDiv:
 			if vm.isZero(kind, right) {
-				return 0, fmt.Errorf("vm error: division by zero")
+				return 0, VMStatusDivisionByZero
 			}
-			return uint64(leftValue / rightValue), nil
+			return uint64(leftValue / rightValue), VMStatusOK
 		}
 	case KindInt32:
 		leftValue, rightValue := int32(left), int32(right)
 		switch op {
 		case ArithmeticAdd:
-			return uint64(uint32(leftValue + rightValue)), nil
+			return uint64(uint32(leftValue + rightValue)), VMStatusOK
 		case ArithmeticSub:
-			return uint64(uint32(leftValue - rightValue)), nil
+			return uint64(uint32(leftValue - rightValue)), VMStatusOK
 		case ArithmeticMul:
-			return uint64(uint32(leftValue * rightValue)), nil
+			return uint64(uint32(leftValue * rightValue)), VMStatusOK
 		case ArithmeticDiv:
 			if vm.isZero(kind, right) {
-				return 0, fmt.Errorf("vm error: division by zero")
+				return 0, VMStatusDivisionByZero
 			}
-			return uint64(uint32(leftValue / rightValue)), nil
+			return uint64(uint32(leftValue / rightValue)), VMStatusOK
 		}
 	case KindFloat32:
 		leftValue := math.Float32frombits(uint32(left))
 		rightValue := math.Float32frombits(uint32(right))
 		switch op {
 		case ArithmeticAdd:
-			return uint64(math.Float32bits(leftValue + rightValue)), nil
+			return uint64(math.Float32bits(leftValue + rightValue)), VMStatusOK
 		case ArithmeticSub:
-			return uint64(math.Float32bits(leftValue - rightValue)), nil
+			return uint64(math.Float32bits(leftValue - rightValue)), VMStatusOK
 		case ArithmeticMul:
-			return uint64(math.Float32bits(leftValue * rightValue)), nil
+			return uint64(math.Float32bits(leftValue * rightValue)), VMStatusOK
 		case ArithmeticDiv:
 			if vm.isZero(kind, right) {
-				return 0, fmt.Errorf("vm error: division by zero")
+				return 0, VMStatusDivisionByZero
 			}
-			return uint64(math.Float32bits(leftValue / rightValue)), nil
+			return uint64(math.Float32bits(leftValue / rightValue)), VMStatusOK
 		}
 	case KindFloat64:
 		leftValue := math.Float64frombits(left)
 		rightValue := math.Float64frombits(right)
 		switch op {
 		case ArithmeticAdd:
-			return math.Float64bits(leftValue + rightValue), nil
+			return math.Float64bits(leftValue + rightValue), VMStatusOK
 		case ArithmeticSub:
-			return math.Float64bits(leftValue - rightValue), nil
+			return math.Float64bits(leftValue - rightValue), VMStatusOK
 		case ArithmeticMul:
-			return math.Float64bits(leftValue * rightValue), nil
+			return math.Float64bits(leftValue * rightValue), VMStatusOK
 		case ArithmeticDiv:
 			if vm.isZero(kind, right) {
-				return 0, fmt.Errorf("vm error: division by zero")
+				return 0, VMStatusDivisionByZero
 			}
-			return math.Float64bits(leftValue / rightValue), nil
+			return math.Float64bits(leftValue / rightValue), VMStatusOK
 		}
 	default:
 		// unhandled kind, treat as error
 	}
 
-	return 0, fmt.Errorf("vm error: unsupported arithmetic op %d", op)
+	return 0, VMStatusInvalidOpcode
 }
 
 func (vm *VM) executeComparison(kind ValueKind, op CompareOp, left uint64, right uint64) int32 {

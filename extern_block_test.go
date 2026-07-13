@@ -21,8 +21,8 @@ void script_main() {
 	linked := mustLinkProgram(t, script, len(externMemory), 0)
 	vm := NewVM(testFrameCapacityBytes)
 	vm.BindExternBlock(externMemory)
-	if err := vm.Run(linked); err != nil {
-		t.Fatalf("Run failed: %v", err)
+	if status := vm.Run(linked); status != VMStatusOK {
+		t.Fatalf("Run failed: %s", status)
 	}
 	if got := int(int32(binary.LittleEndian.Uint32(externMemory[4:]))); got != 30 {
 		t.Fatalf("expected extern byte offset 4 to hold 30, got %d", got)

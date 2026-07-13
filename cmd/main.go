@@ -48,19 +48,19 @@ void reduce_health(int delta) {
 
 	vm := cova.NewVM(256)
 	vm.BindExternBlock(externMemory)
-	vm.RegisterExternDispatcher(func(vm *cova.VM, importID int) error {
+	vm.RegisterExternDispatcher(0, func(_ uintptr, vm *cova.VM, importID uint32) cova.VMStatus {
 		if importID != 0 {
-			return fmt.Errorf("unexpected extern import id %d", importID)
+			return cova.VMStatusHostFailure
 		}
-		value, err := vm.PopInt32()
-		if err != nil {
-			return err
+		value, status := vm.PopInt32()
+		if status != cova.VMStatusOK {
+			return status
 		}
 		fmt.Printf("host log_alert(%d)\n", value)
-		return nil
+		return cova.VMStatusOK
 	})
 
-	check(vm.Run(linked))
+	checkStatus(vm.Run(linked))
 	fmt.Printf("hostPlayerHealth=%d\n", int(int32(binary.LittleEndian.Uint32(externMemory[4:]))))
 }
 
@@ -69,5 +69,13 @@ func check(err error) {
 		return
 	}
 	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
+}
+
+func checkStatus(status cova.VMStatus) {
+	if status == cova.VMStatusOK {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "VM failed: %s\n", status)
 	os.Exit(1)
 }

@@ -299,7 +299,12 @@ const (
 	ScopeExtern
 )
 
-type ExternDispatcher func(vm *VM, importID int) error
+type ExternDispatcher func(hostContext uintptr, vm *VM, importID uint32) VMStatus
+
+type ExternDispatcherBinding struct {
+	HostContext uintptr
+	Dispatcher  ExternDispatcher
+}
 
 type DeclKind int
 

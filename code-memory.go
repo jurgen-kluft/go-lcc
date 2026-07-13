@@ -2,7 +2,6 @@ package cova
 
 import (
 	"encoding/binary"
-	"fmt"
 )
 
 type InstructionMode byte
@@ -101,14 +100,14 @@ func (code CodeMemory) ReadInstruction(ip *int) Instruction {
 	return instruction
 }
 
-func (code CodeMemory) ReadInstructionChecked(ip *int) (Instruction, error) {
+func (code CodeMemory) ReadInstructionChecked(ip *int) (Instruction, VMStatus) {
 	if ip == nil {
-		return 0, fmt.Errorf("vm error: instruction pointer is nil")
+		return 0, VMStatusInvalidAddress
 	}
 	if *ip < 0 || *ip > len(code)-2 {
-		return 0, fmt.Errorf("vm error: truncated instruction at ip %d", *ip)
+		return 0, VMStatusMalformedBytecode
 	}
-	return code.ReadInstruction(ip), nil
+	return code.ReadInstruction(ip), VMStatusOK
 }
 
 func (code *CodeMemory) AppendImmediate(kind ValueKind, value uint64) {
@@ -156,18 +155,18 @@ func (code CodeMemory) ReadImmediate(ip *int, kind ValueKind) (value uint64) {
 	return
 }
 
-func (code CodeMemory) ReadImmediateChecked(ip *int, kind ValueKind) (uint64, error) {
+func (code CodeMemory) ReadImmediateChecked(ip *int, kind ValueKind) (uint64, VMStatus) {
 	if ip == nil {
-		return 0, fmt.Errorf("vm error: instruction pointer is nil")
+		return 0, VMStatusInvalidAddress
 	}
 	size := kind.Size()
 	if size == 0 {
-		return 0, fmt.Errorf("vm error: unsupported immediate kind %d at ip %d", kind, *ip)
+		return 0, VMStatusInvalidValueKind
 	}
 	if *ip < 0 || *ip > len(code)-size {
-		return 0, fmt.Errorf("vm error: truncated %d-byte immediate at ip %d", size, *ip)
+		return 0, VMStatusMalformedBytecode
 	}
-	return code.ReadImmediate(ip, kind), nil
+	return code.ReadImmediate(ip, kind), VMStatusOK
 }
 
 func (code *CodeMemory) AppendInt(value int) {
@@ -186,13 +185,13 @@ func (code CodeMemory) ReadInt(ip *int) int {
 	return value
 }
 
-func (code CodeMemory) ReadIntChecked(ip *int) (int, error) {
+func (code CodeMemory) ReadIntChecked(ip *int) (int, VMStatus) {
 	if ip == nil {
-		return 0, fmt.Errorf("vm error: instruction pointer is nil")
+		return 0, VMStatusInvalidAddress
 	}
 	if *ip < 0 || *ip > len(code)-4 {
-		return 0, fmt.Errorf("vm error: truncated 4-byte operand at ip %d", *ip)
+		return 0, VMStatusMalformedBytecode
 	}
-	return code.ReadInt(ip), nil
+	return code.ReadInt(ip), VMStatusOK
 }
 

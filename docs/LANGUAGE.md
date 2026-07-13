@@ -190,6 +190,14 @@ extern(1) uint64 bounce(uint64 value);
 
 The VM calls the registered extern dispatcher with the given import ID.
 
+Runtime dispatch uses a fixed-width `uint32` import ID, an opaque host context token, and a stable numeric `VMStatus` result. The host reads arguments and writes a return value through checked typed VM stack helpers. Detailed extern signature metadata and exact consumption/production enforcement are part of the portable host ABI work still in progress.
+
+## VM Execution Capacities
+
+Operand-stack, aggregate frame-buffer, and call-frame capacities are host policy supplied through `VMConfig`. They are not computed from script control flow and are not requirements embedded in a linked program. Linking and loading therefore remain independent of the selected workspace capacities. If a reached execution path exceeds one of the configured limits, the VM returns the corresponding stable overflow status at that operation.
+
+`LinkedProgram.FrameByteSize` records only the largest individual script-function frame produced by the compiler. Nested calls can require more frame memory, so this value must not be interpreted as aggregate workspace sizing.
+
 ### Script functions
 
 Script functions are defined directly in the script.
