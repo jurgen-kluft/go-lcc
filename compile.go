@@ -35,31 +35,32 @@ type Compiler struct {
 	dataSymbols           []SymbolBinding
 	constSymbols          []SymbolBinding
 	functions             []SymbolBinding
-	functionBindingByTemp map[int]int
-	localSlots            map[string]int
+	functionBindingByTemp map[uint32]int
+	localSlots            map[string]uint32
 	localTypes            map[string]*Type
 	currentReturnType     *Type
-	currentFrameByteSize  int
-	localSlotCount        int
-	maxLocalSlots         int
-	maxFrameByteSize      int
-	bssByteSize           int
-	dataByteSize          int
-	entryFunction         int
-	nextTempFuncID        int
+	currentFrameByteSize  uint32
+	localSlotCount        uint32
+	maxLocalSlots         uint32
+	maxFrameByteSize      uint32
+	bssByteSize           uint32
+	dataByteSize          uint32
+	entryFunction         uint32
+	hasEntryFunction      bool
+	nextTempFuncID        uint32
 	callPatches           []CallPatch
 	controlStack          []controlFrame
 	localScopeStack       []map[string]struct{}
 	constImage            []byte
 	dataImage             []byte
-	stringLiteralOffsets  map[string]int
+	stringLiteralOffsets  map[string]uint32
 	err                   error
 }
 
 func NewCompiler() *Compiler {
 	return &Compiler{
 		symbolBindings:        make(map[string]SymbolBinding),
-		functionBindingByTemp: make(map[int]int),
+		functionBindingByTemp: make(map[uint32]int),
 		externSymbols:         make([]SymbolBinding, 256),
 		bssSymbols:            make([]SymbolBinding, 256),
 		dataSymbols:           make([]SymbolBinding, 256),
@@ -78,11 +79,11 @@ func cloneTypeSlice(types []*Type) []*Type {
 	return append([]*Type(nil), types...)
 }
 
-func cloneIntMap(values map[string]int) map[string]int {
+func cloneUint32Map(values map[string]uint32) map[string]uint32 {
 	if len(values) == 0 {
 		return nil
 	}
-	clone := make(map[string]int, len(values))
+	clone := make(map[string]uint32, len(values))
 	for name, value := range values {
 		clone[name] = value
 	}
@@ -140,7 +141,7 @@ func (compiler *Compiler) Compile(program *ProgramNode) (*RelocatableProgram, er
 	compiler.dataSymbols = compiler.dataSymbols[:0]
 	compiler.constSymbols = compiler.constSymbols[:0]
 	compiler.functions = compiler.functions[:0]
-	compiler.functionBindingByTemp = make(map[int]int, len(program.Functions))
+	compiler.functionBindingByTemp = make(map[uint32]int, len(program.Functions))
 	compiler.localSlots = nil
 	compiler.localTypes = nil
 	compiler.currentReturnType = nil
@@ -150,14 +151,15 @@ func (compiler *Compiler) Compile(program *ProgramNode) (*RelocatableProgram, er
 	compiler.maxFrameByteSize = 0
 	compiler.bssByteSize = 0
 	compiler.dataByteSize = 0
-	compiler.entryFunction = -1
+	compiler.entryFunction = 0
+	compiler.hasEntryFunction = false
 	compiler.nextTempFuncID = 0
 	compiler.callPatches = compiler.callPatches[:0]
 	compiler.controlStack = compiler.controlStack[:0]
 	compiler.localScopeStack = compiler.localScopeStack[:0]
 	compiler.constImage = compiler.constImage[:0]
 	compiler.dataImage = compiler.dataImage[:0]
-	compiler.stringLiteralOffsets = make(map[string]int)
+	compiler.stringLiteralOffsets = make(map[string]uint32)
 	compiler.err = nil
 
 	for _, decl := range program.Decls {
@@ -221,21 +223,21 @@ func (compiler *Compiler) Compile(program *ProgramNode) (*RelocatableProgram, er
 		EntryFunction:  compiler.entryFunction,
 		FrameSize:      compiler.maxLocalSlots,
 		FrameByteSize:  compiler.maxFrameByteSize,
-		ConstByteSize:  len(compiler.constImage),
+		ConstByteSize:  lenu32(compiler.constImage),
 		ConstData:      append([]byte(nil), compiler.constImage...),
 		DataByteSize:   compiler.dataByteSize,
 		DataData:       append([]byte(nil), compiler.dataImage...),
-		BSSSize:        len(compiler.bssSymbols),
+		BSSSize:        lenu32(compiler.bssSymbols),
 		BSSByteSize:    compiler.bssByteSize,
 	}
 	return compiled, nil
 }
 
 func (compiler *Compiler) validateScriptCallGraph() error {
-	if compiler.entryFunction < 0 {
+	if !compiler.hasEntryFunction {
 		return fmt.Errorf("compile error: entry function not set")
 	}
-	functionByTemp := make(map[int]SymbolBinding, len(compiler.functions))
+	functionByTemp := make(map[uint32]SymbolBinding, len(compiler.functions))
 	for _, binding := range compiler.functions {
 		functionByTemp[binding.TempFuncID] = binding
 	}
@@ -243,9 +245,9 @@ func (compiler *Compiler) validateScriptCallGraph() error {
 	if err != nil {
 		return err
 	}
-	states := make(map[int]callGraphState, len(callGraph))
-	var visit func(tempFuncID int) error
-	visit = func(tempFuncID int) error {
+	states := make(map[uint32]callGraphState, len(callGraph))
+	var visit func(tempFuncID uint32) error
+	visit = func(tempFuncID uint32) error {
 		switch states[tempFuncID] {
 		case callGraphVisited:
 			return nil
@@ -268,7 +270,7 @@ func (compiler *Compiler) validateScriptCallGraph() error {
 	return visit(compiler.entryFunction)
 }
 
-func (compiler *Compiler) buildScriptCallGraph(functionByTemp map[int]SymbolBinding) (map[int][]int, error) {
+func (compiler *Compiler) buildScriptCallGraph(functionByTemp map[uint32]SymbolBinding) (map[uint32][]uint32, error) {
 	ordered := make([]SymbolBinding, 0, len(compiler.functions))
 	for _, binding := range compiler.functions {
 		if binding.Scope == ScopeBSS {
@@ -278,24 +280,26 @@ func (compiler *Compiler) buildScriptCallGraph(functionByTemp map[int]SymbolBind
 	sort.Slice(ordered, func(index int, other int) bool {
 		return ordered[index].ScriptAddress < ordered[other].ScriptAddress
 	})
-	callGraph := make(map[int][]int, len(ordered))
+	callGraph := make(map[uint32][]uint32, len(ordered))
 	for _, binding := range ordered {
 		callGraph[binding.TempFuncID] = nil
 	}
 	for _, patch := range compiler.callPatches {
-		callerID := -1
+		var callerID uint32
+		callerFound := false
 		for index, binding := range ordered {
-			start := binding.ScriptAddress
+			start := int(binding.ScriptAddress)
 			end := len(compiler.code)
 			if index+1 < len(ordered) {
-				end = ordered[index+1].ScriptAddress
+				end = int(ordered[index+1].ScriptAddress)
 			}
 			if patch.OperandPos >= start && patch.OperandPos < end {
 				callerID = binding.TempFuncID
+				callerFound = true
 				break
 			}
 		}
-		if callerID < 0 {
+		if !callerFound {
 			return nil, fmt.Errorf("compile error on line %d: unable to resolve caller for script call patch", patch.Line)
 		}
 		if _, ok := functionByTemp[patch.TempFuncID]; !ok {
@@ -320,9 +324,9 @@ func (compiler *Compiler) registerTopLevelDecl(decl *TopLevelDeclNode) {
 		Kind:          decl.Kind,
 		Scope:         decl.Scope,
 		Type:          decl.Type,
-		ByteSize:      decl.Type.Size,
-		ByteAlignment: decl.Type.Alignment(),
-		ParamCount:    len(decl.Params),
+		ByteSize:      uint32(decl.Type.Size),
+		ByteAlignment: uint32(decl.Type.Alignment()),
+		ParamCount:    lenu32(decl.Params),
 		ParamTypes:    parameterTypes(decl.Params),
 	}
 
@@ -330,24 +334,32 @@ func (compiler *Compiler) registerTopLevelDecl(decl *TopLevelDeclNode) {
 	case DeclVariable:
 		switch decl.Scope {
 		case ScopeExtern:
-			binding.SlotIndex = decl.Index
-			binding.ByteOffset = decl.Index
+			indexU32, ok := imageUint32FromInt(decl.Index)
+			if !ok {
+				compiler.fail(fmt.Errorf("compile error on line %d: extern variable %q index %d exceeds uint32", decl.Line, decl.Name, decl.Index))
+				return
+			}
+			binding.SlotIndex = indexU32
+			binding.ByteOffset = indexU32
 			compiler.externSymbols = append(compiler.externSymbols, binding)
 		case ScopeBSS:
-			binding.SlotIndex = len(compiler.bssSymbols)
-			binding.ByteOffset = alignUp(compiler.bssByteSize, binding.ByteAlignment)
-			compiler.bssByteSize = binding.ByteOffset + binding.ByteSize
+			byteOffsetU32 := alignUpU32(compiler.bssByteSize, binding.ByteAlignment)
+			binding.SlotIndex = lenu32(compiler.bssSymbols)
+			binding.ByteOffset = byteOffsetU32
+			compiler.bssByteSize = byteOffsetU32 + binding.ByteSize
 			compiler.bssSymbols = append(compiler.bssSymbols, binding)
 		case ScopeData:
-			binding.SlotIndex = len(compiler.dataSymbols)
-			binding.ByteOffset = alignUp(compiler.dataByteSize, binding.ByteAlignment)
-			compiler.dataByteSize = binding.ByteOffset + binding.ByteSize
+			byteOffsetU32 := alignUpU32(compiler.dataByteSize, binding.ByteAlignment)
+			binding.SlotIndex = lenu32(compiler.dataSymbols)
+			binding.ByteOffset = byteOffsetU32
+			compiler.dataByteSize = byteOffsetU32 + binding.ByteSize
 			compiler.ensureDataSize(compiler.dataByteSize)
 			compiler.dataSymbols = append(compiler.dataSymbols, binding)
 		case ScopeConst:
-			binding.SlotIndex = len(compiler.constSymbols)
-			binding.ByteOffset = alignUp(len(compiler.constImage), binding.ByteAlignment)
-			compiler.ensureConstSize(binding.ByteOffset + binding.ByteSize)
+			byteOffsetU32 := alignUpU32(lenu32(compiler.constImage), binding.ByteAlignment)
+			binding.SlotIndex = lenu32(compiler.constSymbols)
+			binding.ByteOffset = byteOffsetU32
+			compiler.ensureConstSize(byteOffsetU32 + binding.ByteSize)
 			compiler.constSymbols = append(compiler.constSymbols, binding)
 		default:
 			compiler.fail(fmt.Errorf("compile error on line %d: variable %q has invalid scope %d", decl.Line, decl.Name, decl.Scope))
@@ -358,7 +370,12 @@ func (compiler *Compiler) registerTopLevelDecl(decl *TopLevelDeclNode) {
 			compiler.fail(fmt.Errorf("compile error on line %d: function contract %q must be host-linked", decl.Line, decl.Name))
 			return
 		}
-		binding.SlotIndex = decl.Index
+		indexU32, ok := imageUint32FromInt(decl.Index)
+		if !ok {
+			compiler.fail(fmt.Errorf("compile error on line %d: host-linked function %q slot %d exceeds uint32", decl.Line, decl.Name, decl.Index))
+			return
+		}
+		binding.SlotIndex = indexU32
 		binding.TempFuncID = compiler.allocateTempFuncID()
 		compiler.trackFunctionBinding(binding)
 	default:
@@ -382,9 +399,9 @@ func (compiler *Compiler) registerScriptFunction(function *FunctionNode) {
 		Kind:          DeclFunction,
 		Scope:         ScopeBSS,
 		Type:          function.ReturnType,
-		ByteSize:      function.ReturnType.Size,
-		ByteAlignment: function.ReturnType.Alignment(),
-		ParamCount:    len(function.Params),
+		ByteSize:      uint32(function.ReturnType.Size),
+		ByteAlignment: uint32(function.ReturnType.Alignment()),
+		ParamCount:    lenu32(function.Params),
 		ParamTypes:    parameterTypes(function.Params),
 		TempFuncID:    compiler.allocateTempFuncID(),
 	}
@@ -392,12 +409,14 @@ func (compiler *Compiler) registerScriptFunction(function *FunctionNode) {
 	compiler.symbolBindings[function.Name] = binding
 	if function.Name == "script_main" {
 		compiler.entryFunction = binding.TempFuncID
-	} else if compiler.entryFunction < 0 {
+		compiler.hasEntryFunction = true
+	} else if !compiler.hasEntryFunction {
 		compiler.entryFunction = binding.TempFuncID
+		compiler.hasEntryFunction = true
 	}
 }
 
-func (compiler *Compiler) allocateTempFuncID() int {
+func (compiler *Compiler) allocateTempFuncID() uint32 {
 	tempFuncID := compiler.nextTempFuncID
 	compiler.nextTempFuncID++
 	return tempFuncID
@@ -417,31 +436,36 @@ func (compiler *Compiler) compileFunction(function *FunctionNode) {
 		compiler.fail(fmt.Errorf("compile error on line %d: unknown function %q", function.Line, function.Name))
 		return
 	}
-	binding.ScriptAddress = len(compiler.code)
-	compiler.localSlots = make(map[string]int, len(function.Params))
+	scriptAddress, ok := imageUint32FromInt(len(compiler.code))
+	if !ok {
+		compiler.fail(fmt.Errorf("compile error on line %d: function %q code address %d exceeds uint32", function.Line, function.Name, len(compiler.code)))
+		return
+	}
+	binding.ScriptAddress = scriptAddress
+	compiler.localSlots = make(map[string]uint32, len(function.Params))
 	compiler.localTypes = make(map[string]*Type, len(function.Params))
 	compiler.currentReturnType = function.ReturnType
 	compiler.localScopeStack = compiler.localScopeStack[:0]
 	compiler.localSlotCount = 0
-	frameByteSize := 0
-	paramOffsets := make([]int, 0, len(function.Params))
+	frameByteSize := uint32(0)
+	paramOffsets := make([]uint32, 0, len(function.Params))
 	for _, param := range function.Params {
 		if _, exists := compiler.localSlots[param.Name]; exists {
 			compiler.fail(fmt.Errorf("compile error on line %d: duplicate parameter %q", param.Line, param.Name))
 			return
 		}
-		frameByteSize = alignUp(frameByteSize, param.Type.Alignment())
+		frameByteSize = alignUpU32(frameByteSize, uint32(param.Type.Alignment()))
 		compiler.localSlots[param.Name] = frameByteSize
 		compiler.localTypes[param.Name] = param.Type
 		paramOffsets = append(paramOffsets, frameByteSize)
 		compiler.localSlotCount++
-		frameByteSize += param.Type.Size
+		frameByteSize += uint32(param.Type.Size)
 	}
 	binding.ParamOffsets = paramOffsets
 	binding.FrameSlotCount = compiler.localSlotCount
 	binding.FrameByteSize = frameByteSize
 	compiler.currentFrameByteSize = frameByteSize
-	binding.ScriptAddress = len(compiler.code)
+	binding.ScriptAddress = scriptAddress
 	compiler.storeFunctionBinding(binding)
 	compiler.compileBlock(function.Body)
 	if compiler.err != nil {
@@ -481,7 +505,7 @@ func cloneBindingsMap(bindings map[string]SymbolBinding) map[string]SymbolBindin
 	for name, binding := range bindings {
 		binding.ParamTypes = cloneTypeSlice(binding.ParamTypes)
 		if len(binding.ParamOffsets) != 0 {
-			binding.ParamOffsets = append([]int(nil), binding.ParamOffsets...)
+			binding.ParamOffsets = append([]uint32(nil), binding.ParamOffsets...)
 		}
 		clone[name] = binding
 	}
@@ -543,7 +567,7 @@ func (compiler *Compiler) compileExprAs(expr ExprNode, expected *Type) {
 			return
 		}
 		compiler.emitInstruction(makeAddrInstruction(segmentConst))
-		compiler.code.AppendInt(compiler.internStringLiteral(node.Value))
+		compiler.code.AppendUint32(compiler.internStringLiteral(node.Value))
 	case *IdentNode:
 		actualKind := kind
 		if actual := compiler.exprType(expr); actual != nil {
@@ -586,7 +610,7 @@ func (compiler *Compiler) compileExprAs(expr ExprNode, expected *Type) {
 			compiler.emitArithmetic(node.Op, binaryKind)
 		case "==", "!=", "<", ">", "<=", ">=":
 			compiler.emitComparison(node.Op, binaryKind)
-			compiler.emitConvertIfNeeded(KindInt32, kind)
+			compiler.emitConvertIfNeeded(KindBool, kind)
 		default:
 			compiler.fail(fmt.Errorf("compile error on line %d: unsupported binary operator %q", node.Line, node.Op))
 		}
@@ -596,7 +620,7 @@ func (compiler *Compiler) compileExprAs(expr ExprNode, expected *Type) {
 			compiler.fail(fmt.Errorf("compile error on line %d: unknown function %q", node.Line, node.Callee))
 			return
 		}
-		if len(node.Args) != binding.ParamCount {
+		if lenu32(node.Args) != binding.ParamCount {
 			compiler.fail(fmt.Errorf("compile error on line %d: function %q expects %d arguments, got %d", node.Line, node.Callee, binding.ParamCount, len(node.Args)))
 			return
 		}
@@ -632,29 +656,29 @@ func (compiler *Compiler) canAssignStringLiteral(target *Type) bool {
 	return target.Base.Kind == TypeUint8 && target.Base.IsConst
 }
 
-func (compiler *Compiler) internStringLiteral(value string) int {
+func (compiler *Compiler) internStringLiteral(value string) uint32 {
 	if offset, ok := compiler.stringLiteralOffsets[value]; ok {
 		return offset
 	}
-	offset := len(compiler.constImage)
+	offset := lenu32(compiler.constImage)
 	compiler.constImage = append(compiler.constImage, []byte(value)...)
 	compiler.constImage = append(compiler.constImage, 0)
 	compiler.stringLiteralOffsets[value] = offset
 	return offset
 }
 
-func (compiler *Compiler) ensureDataSize(size int) {
-	if size <= len(compiler.dataImage) {
+func (compiler *Compiler) ensureDataSize(size uint32) {
+	if size <= lenu32(compiler.dataImage) {
 		return
 	}
-	compiler.dataImage = append(compiler.dataImage, make([]byte, size-len(compiler.dataImage))...)
+	compiler.dataImage = append(compiler.dataImage, make([]byte, int(size-lenu32(compiler.dataImage)))...)
 }
 
-func (compiler *Compiler) ensureConstSize(size int) {
-	if size <= len(compiler.constImage) {
+func (compiler *Compiler) ensureConstSize(size uint32) {
+	if size <= lenu32(compiler.constImage) {
 		return
 	}
-	compiler.constImage = append(compiler.constImage, make([]byte, size-len(compiler.constImage))...)
+	compiler.constImage = append(compiler.constImage, make([]byte, int(size-lenu32(compiler.constImage)))...)
 }
 
 func (compiler *Compiler) initializeGlobal(binding SymbolBinding, expr ExprNode, line int) {
@@ -681,7 +705,7 @@ func (compiler *Compiler) initializeGlobal(binding SymbolBinding, expr ExprNode,
 	} else {
 		segment = MemorySegment(compiler.dataImage)
 	}
-	if status := (&segment).WriteBits(binding.ByteOffset, bindingKind, bits); status != VMStatusOK {
+	if status := writeGlobalInitializer(&segment, binding.ByteOffset, bindingKind, bits); status != VMStatusOK {
 		compiler.fail(fmt.Errorf("compile error on line %d: failed to encode initializer for %q: %s", line, binding.Name, status))
 		return
 	}
@@ -690,6 +714,21 @@ func (compiler *Compiler) initializeGlobal(binding SymbolBinding, expr ExprNode,
 		return
 	}
 	compiler.dataImage = []byte(segment)
+}
+
+func writeGlobalInitializer(segment *MemorySegment, offset uint32, kind ValueKind, bits uint64) VMStatus {
+	switch kind {
+	case KindBool, KindByte, KindInt8, KindUint8:
+		return segment.WriteUint8(offset, uint8(bits))
+	case KindInt16, KindUint16:
+		return segment.WriteUint16(offset, uint16(bits))
+	case KindInt32, KindUint32, KindFloat32, KindAddress:
+		return segment.WriteUint32(offset, uint32(bits))
+	case KindInt64, KindUint64, KindFloat64:
+		return segment.WriteUint64(offset, bits)
+	default:
+		return VMStatusInvalidValueKind
+	}
 }
 
 func (compiler *Compiler) globalInitializerBits(target *Type, expr ExprNode, line int) (uint64, error) {
@@ -720,7 +759,7 @@ func (compiler *Compiler) globalInitializerBits(target *Type, expr ExprNode, lin
 }
 
 func (compiler *Compiler) compileLogicalExpr(node *BinaryExpr, expectedKind ValueKind) {
-	compiler.compileExprAs(node.Left, Int32Type)
+	compiler.compileExprAs(node.Left, BoolType)
 	if compiler.err != nil {
 		return
 	}
@@ -728,7 +767,7 @@ func (compiler *Compiler) compileLogicalExpr(node *BinaryExpr, expectedKind Valu
 	switch node.Op {
 	case "&&":
 		leftFalsePos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
-		compiler.compileExprAs(node.Right, Int32Type)
+		compiler.compileExprAs(node.Right, BoolType)
 		if compiler.err != nil {
 			return
 		}
@@ -746,7 +785,7 @@ func (compiler *Compiler) compileLogicalExpr(node *BinaryExpr, expectedKind Valu
 		leftEndPos := compiler.emitOpWithOperand(OpJump, 0)
 		rightStart := len(compiler.code)
 		compiler.patchOperand(leftFalsePos, rightStart)
-		compiler.compileExprAs(node.Right, Int32Type)
+		compiler.compileExprAs(node.Right, BoolType)
 		if compiler.err != nil {
 			return
 		}
@@ -868,7 +907,7 @@ func (compiler *Compiler) compileBlock(block *BlockStmt) {
 	if block == nil {
 		return
 	}
-	savedSlots := cloneIntMap(compiler.localSlots)
+	savedSlots := cloneUint32Map(compiler.localSlots)
 	savedTypes := cloneTypeMap(compiler.localTypes)
 	compiler.localScopeStack = append(compiler.localScopeStack, make(map[string]struct{}))
 	defer func() {
@@ -895,7 +934,7 @@ func (compiler *Compiler) compileStmt(stmt StmtNode) {
 	case *LocalDeclStmt:
 		compiler.compileLocalDecl(node)
 	case *IfStmt:
-		compiler.compileExprAs(node.Condition, Int32Type)
+		compiler.compileExprAs(node.Condition, BoolType)
 		jumpPos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
 		compiler.compileStmt(node.Then)
 		if node.Else == nil {
@@ -908,12 +947,12 @@ func (compiler *Compiler) compileStmt(stmt StmtNode) {
 		compiler.patchOperand(skipElsePos, len(compiler.code))
 	case *WhileStmt:
 		loopStart := len(compiler.code)
-		compiler.compileExprAs(node.Condition, Int32Type)
+		compiler.compileExprAs(node.Condition, BoolType)
 		exitPos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
 		compiler.controlStack = append(compiler.controlStack, controlFrame{allowsContinue: true, continueTarget: loopStart})
 		compiler.compileStmt(node.Body)
 		compiler.patchCurrentContinues(loopStart)
-		compiler.emitOpWithOperand(OpJump, loopStart)
+		compiler.emitOpWithOperand(OpJump, uint32(loopStart))
 		loopEnd := len(compiler.code)
 		compiler.patchOperand(exitPos, loopEnd)
 		compiler.patchCurrentBreaks(loopEnd)
@@ -925,7 +964,7 @@ func (compiler *Compiler) compileStmt(stmt StmtNode) {
 		loopStart := len(compiler.code)
 		exitPos := -1
 		if node.Condition != nil {
-			compiler.compileExprAs(node.Condition, Int32Type)
+			compiler.compileExprAs(node.Condition, BoolType)
 			exitPos = compiler.emitOpWithOperand(OpJumpIfFalse, 0)
 		}
 		compiler.controlStack = append(compiler.controlStack, controlFrame{allowsContinue: true, continueTarget: -1})
@@ -936,7 +975,7 @@ func (compiler *Compiler) compileStmt(stmt StmtNode) {
 		if node.Post != nil {
 			compiler.compileStmt(node.Post)
 		}
-		compiler.emitOpWithOperand(OpJump, loopStart)
+		compiler.emitOpWithOperand(OpJump, uint32(loopStart))
 		loopEnd := len(compiler.code)
 		if exitPos >= 0 {
 			compiler.patchOperand(exitPos, loopEnd)
@@ -1031,11 +1070,11 @@ func (compiler *Compiler) allocateLocal(name string, typ *Type, line int) {
 		compiler.fail(fmt.Errorf("compile error on line %d: duplicate local declaration %q", line, name))
 		return
 	}
-	offset := alignUp(compiler.currentFrameByteSize, typ.Alignment())
+	offset := alignUpU32(compiler.currentFrameByteSize, uint32(typ.Alignment()))
 	compiler.localSlots[name] = offset
 	compiler.localTypes[name] = typ
 	scope[name] = struct{}{}
-	compiler.currentFrameByteSize = offset + typ.Size
+	compiler.currentFrameByteSize = offset + uint32(typ.Size)
 	compiler.localSlotCount++
 }
 
@@ -1187,7 +1226,7 @@ func (compiler *Compiler) compileExpr(expr ExprNode) {
 func (node *IdentNode) EmitAddress(code *CodeMemory, compiler *Compiler) {
 	if slot, ok := compiler.localSlots[node.Name]; ok {
 		code.AppendInstruction(makeAddrInstruction(segmentFrame))
-		code.AppendInt(slot)
+		code.AppendUint32(slot)
 		return
 	}
 	binding, ok := compiler.symbolBindings[node.Name]
@@ -1195,19 +1234,19 @@ func (node *IdentNode) EmitAddress(code *CodeMemory, compiler *Compiler) {
 		switch binding.Scope {
 		case ScopeBSS:
 			code.AppendInstruction(makeAddrInstruction(segmentBSS))
-			code.AppendInt(binding.ByteOffset)
+			code.AppendUint32(binding.ByteOffset)
 			return
 		case ScopeData:
 			code.AppendInstruction(makeAddrInstruction(segmentData))
-			code.AppendInt(binding.ByteOffset)
+			code.AppendUint32(binding.ByteOffset)
 			return
 		case ScopeConst:
 			code.AppendInstruction(makeAddrInstruction(segmentConst))
-			code.AppendInt(binding.ByteOffset)
+			code.AppendUint32(binding.ByteOffset)
 			return
 		case ScopeExtern:
 			code.AppendInstruction(makeAddrInstruction(segmentExtern))
-			code.AppendInt(binding.ByteOffset)
+			code.AppendUint32(binding.ByteOffset)
 			return
 		}
 	}
@@ -1226,15 +1265,15 @@ func (compiler *Compiler) emitInstruction(instruction Instruction) {
 	compiler.code.AppendInstruction(instruction)
 }
 
-func (compiler *Compiler) emitOpWithOperand(op Opcode, operand int) int {
+func (compiler *Compiler) emitOpWithOperand(op Opcode, operand uint32) int {
 	compiler.emit(op)
 	position := len(compiler.code)
-	compiler.code.AppendInt(operand)
+	compiler.code.AppendUint32(operand)
 	return position
 }
 
 func (compiler *Compiler) patchOperand(position int, operand int) {
-	compiler.code.PatchInt(position, operand)
+	compiler.code.PatchUint32(position, uint32(operand))
 }
 
 func (compiler *Compiler) fail(err error) {

@@ -1,7 +1,6 @@
 package cova
 
 import (
-	"encoding/binary"
 	"math"
 	"strings"
 	"testing"
@@ -154,7 +153,11 @@ func runOptimizerTestProgram(t *testing.T, source string, optimize bool) int32 {
 		t.Fatalf("Run failed: %s", status)
 	}
 	offset := linked.DebugSymbols.Symbols["result"].ByteOffset
-	return int32(binary.LittleEndian.Uint32(vm.memory.segment[segmentBSS][offset : offset+4]))
+	result, status := vm.memory.ReadInt32(makeAddress(segmentBSS, offset))
+	if status != VMStatusOK {
+		t.Fatalf("ReadInt32 result failed: %s", status)
+	}
+	return result
 }
 
 func parseOptimizerTestProgram(t *testing.T, source string) *ProgramNode {

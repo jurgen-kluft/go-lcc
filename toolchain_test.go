@@ -7,12 +7,30 @@ import (
 	"testing"
 )
 
-func readCString(segment []byte, offset int) string {
+func readCString(segment []byte, offset uint32) string {
 	end := offset
-	for end < len(segment) && segment[end] != 0 {
+	for end < uint32(len(segment)) && segment[end] != 0 {
 		end++
 	}
 	return string(segment[offset:end])
+}
+
+func mustReadMemoryInt32(t *testing.T, memory *ProgramMemory, address Address) int32 {
+	t.Helper()
+	value, status := memory.ReadInt32(address)
+	if status != VMStatusOK {
+		t.Fatalf("ReadInt32 failed: %s", status)
+	}
+	return value
+}
+
+func mustReadMemoryAddress(t *testing.T, memory *ProgramMemory, address Address) Address {
+	t.Helper()
+	value, status := memory.ReadAddress(address)
+	if status != VMStatusOK {
+		t.Fatalf("ReadAddress failed: %s", status)
+	}
+	return value
 }
 
 const testFrameCapacityBytes = 256
@@ -32,10 +50,10 @@ void script_main() {
 	if len(code) < 14 {
 		t.Fatalf("expected compiled code, got %d bytes", len(code))
 	}
-	if linked.EntryPoint < 0 || linked.EntryPoint >= len(linked.Functions) {
+	if int(linked.EntryPoint) >= len(linked.Functions) {
 		t.Fatalf("entry point %d out of range", linked.EntryPoint)
 	}
-	ip := linked.Functions[linked.EntryPoint].BodyAddress
+	ip := linked.Functions[int(linked.EntryPoint)].BodyAddress
 	if op := code.ReadInstruction(&ip).Opcode(); op != OpPush {
 		t.Fatalf("expected OpPush at function body start, got %d", op)
 	}
@@ -282,8 +300,7 @@ void script_main() {
 	if dataBinding.Scope != ScopeData {
 		t.Fatalf("expected data global scope, got %d", dataBinding.Scope)
 	}
-	storedBits := binary.LittleEndian.Uint32(vm.memory.segment[segmentData][dataBinding.ByteOffset : dataBinding.ByteOffset+4])
-	storedAddress := Address(storedBits)
+	storedAddress := mustReadMemoryAddress(t, &vm.memory, makeAddress(segmentData, dataBinding.ByteOffset))
 	if storedAddress.Segment() != segmentConst {
 		t.Fatalf("expected data initializer to point into const segment, got %s", storedAddress.Segment())
 	}
@@ -560,6 +577,26 @@ void script_main() {
 	}
 	if externMemory[4] != 1 {
 		t.Fatalf("expected bool parameter conversion to normalize non-zero input to 1, got %d", externMemory[4])
+	}
+}
+
+func TestComparisonResultUsesOneByteBoolStackValue(t *testing.T) {
+	script := `
+bool script_main() {
+	return 7 > 3;
+}
+`
+
+	linked := mustLinkProgram(t, script, 0, 0)
+	vm := NewVM(testFrameCapacityBytes)
+	if status := vm.Run(linked); status != VMStatusOK {
+		t.Fatalf("Run failed: %s", status)
+	}
+	if got := len(vm.memory.segment[segmentStack]); got != 1 {
+		t.Fatalf("expected one-byte comparison result, got stack length %d", got)
+	}
+	if result, status := vm.PopBool(); status != VMStatusOK || !result {
+		t.Fatalf("expected true comparison result, got %v status=%s", result, status)
 	}
 }
 
@@ -885,11 +922,11 @@ int script_main() {
 	if len(linked.ParamKinds) != 2 || len(linked.ParamOffsets) != 2 {
 		t.Fatalf("expected two flat parameters, got %d kinds and %d offsets", len(linked.ParamKinds), len(linked.ParamOffsets))
 	}
-	if linked.EntryPoint < 0 || linked.EntryPoint >= len(linked.Functions) {
+	if int(linked.EntryPoint) >= len(linked.Functions) {
 		t.Fatalf("entry point %d out of range", linked.EntryPoint)
 	}
 	for index, function := range linked.Functions {
-		if function.BodyAddress < 0 || function.BodyAddress >= len(linked.Text) {
+		if int(function.BodyAddress) >= len(linked.Text) {
 			t.Fatalf("function %d body address %d out of range", index, function.BodyAddress)
 		}
 	}
@@ -1020,20 +1057,20 @@ func TestRunPreservesNestedUint64ReturnBits(t *testing.T) {
 	entryAddress := len(code)
 	code.AppendInstruction(makeInstruction(OpCall, KindNone, ModeNone, FlagNone))
 	callOperandPos := len(code)
-	code.AppendInt(1)
+	code.AppendUint32(1)
 	code.AppendInstruction(makeInstruction(OpRet, KindNone, ModeNone, FlagNone))
 	helperAddress := len(code)
 	code.AppendInstruction(makeInstruction(OpPush, KindUint64, ModeNone, FlagNone))
 	code.AppendImmediate(KindUint64, uint64(1)<<63)
 	code.AppendInstruction(makeInstruction(OpRet, KindNone, ModeNone, FlagNone))
-	code.PatchInt(callOperandPos, 1)
+	code.PatchUint32(callOperandPos, 1)
 
 	program := &LinkedProgram{
 		Text:       code,
 		EntryPoint: 0,
 		Functions: []ScriptFunctionDescriptor{
-			{BodyAddress: entryAddress, ReturnKind: KindUint64},
-			{BodyAddress: helperAddress, ReturnKind: KindUint64},
+			{BodyAddress: uint32(entryAddress), ReturnKind: KindUint64},
+			{BodyAddress: uint32(helperAddress), ReturnKind: KindUint64},
 		},
 	}
 
@@ -1049,7 +1086,7 @@ func TestRunPreservesNestedUint64ReturnBits(t *testing.T) {
 func TestOpCallErrorsOnOutOfRangeCodeAddress(t *testing.T) {
 	var code CodeMemory
 	code.AppendInstruction(makeInstruction(OpCall, KindNone, ModeNone, FlagNone))
-	code.AppendInt(99)
+	code.AppendUint32(99)
 	code.AppendInstruction(makeInstruction(OpRet, KindNone, ModeNone, FlagNone))
 	program := &LinkedProgram{
 		Text:       code,
@@ -1089,13 +1126,13 @@ void script_main() {
 	}
 	counterOffset := linked.DebugSymbols.Symbols["counter"].ByteOffset
 	totalOffset := linked.DebugSymbols.Symbols["total"].ByteOffset
-	counterBits := binary.LittleEndian.Uint32(vm.memory.segment[segmentBSS][counterOffset : counterOffset+4])
-	totalBits := binary.LittleEndian.Uint32(vm.memory.segment[segmentBSS][totalOffset : totalOffset+4])
-	if int32(counterBits) != 5 {
-		t.Fatalf("expected counter 5, got %d", int32(counterBits))
+	counter := mustReadMemoryInt32(t, &vm.memory, makeAddress(segmentBSS, counterOffset))
+	total := mustReadMemoryInt32(t, &vm.memory, makeAddress(segmentBSS, totalOffset))
+	if counter != 5 {
+		t.Fatalf("expected counter 5, got %d", counter)
 	}
-	if int32(totalBits) != 14 {
-		t.Fatalf("expected total 14, got %d", int32(totalBits))
+	if total != 14 {
+		t.Fatalf("expected total 14, got %d", total)
 	}
 }
 
@@ -1135,13 +1172,13 @@ void script_main() {
 	}
 	counterOffset := linked.DebugSymbols.Symbols["counter"].ByteOffset
 	totalOffset := linked.DebugSymbols.Symbols["total"].ByteOffset
-	counterBits := binary.LittleEndian.Uint32(vm.memory.segment[segmentBSS][counterOffset : counterOffset+4])
-	totalBits := binary.LittleEndian.Uint32(vm.memory.segment[segmentBSS][totalOffset : totalOffset+4])
-	if int32(counterBits) != 4 {
-		t.Fatalf("expected counter 4 after break, got %d", int32(counterBits))
+	counter := mustReadMemoryInt32(t, &vm.memory, makeAddress(segmentBSS, counterOffset))
+	total := mustReadMemoryInt32(t, &vm.memory, makeAddress(segmentBSS, totalOffset))
+	if counter != 4 {
+		t.Fatalf("expected counter 4 after break, got %d", counter)
 	}
-	if int32(totalBits) != 40 {
-		t.Fatalf("expected total 40, got %d", int32(totalBits))
+	if total != 40 {
+		t.Fatalf("expected total 40, got %d", total)
 	}
 }
 
@@ -1187,9 +1224,9 @@ void script_main() {
 		t.Fatalf("Run failed: %v", err)
 	}
 	totalOffset := linked.DebugSymbols.Symbols["total"].ByteOffset
-	totalBits := binary.LittleEndian.Uint32(vm.memory.segment[segmentBSS][totalOffset : totalOffset+4])
-	if int32(totalBits) != 23 {
-		t.Fatalf("expected total 23, got %d", int32(totalBits))
+	total := mustReadMemoryInt32(t, &vm.memory, makeAddress(segmentBSS, totalOffset))
+	if total != 23 {
+		t.Fatalf("expected total 23, got %d", total)
 	}
 }
 
@@ -1215,9 +1252,9 @@ void script_main() {
 		t.Fatalf("Run failed: %v", err)
 	}
 	totalOffset := linked.DebugSymbols.Symbols["total"].ByteOffset
-	totalBits := binary.LittleEndian.Uint32(vm.memory.segment[segmentBSS][totalOffset : totalOffset+4])
-	if int32(totalBits) != 10 {
-		t.Fatalf("expected total 10, got %d", int32(totalBits))
+	total := mustReadMemoryInt32(t, &vm.memory, makeAddress(segmentBSS, totalOffset))
+	if total != 10 {
+		t.Fatalf("expected total 10, got %d", total)
 	}
 }
 

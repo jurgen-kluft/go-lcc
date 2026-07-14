@@ -94,17 +94,18 @@ func (code CodeMemory) PatchInstruction(position int, instruction Instruction) {
 	binary.LittleEndian.PutUint16(code[position:position+2], uint16(instruction))
 }
 
-func (code CodeMemory) ReadInstruction(ip *int) Instruction {
-	instruction := Instruction(binary.LittleEndian.Uint16(code[*ip : *ip+2]))
+func (code CodeMemory) ReadInstruction(ip *uint32) Instruction {
+	position := int(*ip)
+	instruction := Instruction(binary.LittleEndian.Uint16(code[position : position+2]))
 	*ip += 2
 	return instruction
 }
 
-func (code CodeMemory) ReadInstructionChecked(ip *int) (Instruction, VMStatus) {
+func (code CodeMemory) ReadInstructionChecked(ip *uint32) (Instruction, VMStatus) {
 	if ip == nil {
 		return 0, VMStatusInvalidAddress
 	}
-	if *ip < 0 || *ip > len(code)-2 {
+	if uint64(*ip)+2 > uint64(len(code)) {
 		return 0, VMStatusMalformedBytecode
 	}
 	return code.ReadInstruction(ip), VMStatusOK
@@ -135,19 +136,20 @@ func (code *CodeMemory) AppendImmediate(kind ValueKind, value uint64) {
 	}
 }
 
-func (code CodeMemory) ReadImmediate(ip *int, kind ValueKind) (value uint64) {
+func (code CodeMemory) ReadImmediate(ip *uint32, kind ValueKind) (value uint64) {
+	position := int(*ip)
 	switch kind.Size() {
 	case 1:
-		value = uint64(code[*ip])
+		value = uint64(code[position])
 		*ip += 1
 	case 2:
-		value = uint64(binary.LittleEndian.Uint16(code[*ip : *ip+2]))
+		value = uint64(binary.LittleEndian.Uint16(code[position : position+2]))
 		*ip += 2
 	case 4:
-		value = uint64(binary.LittleEndian.Uint32(code[*ip : *ip+4]))
+		value = uint64(binary.LittleEndian.Uint32(code[position : position+4]))
 		*ip += 4
 	case 8:
-		value = binary.LittleEndian.Uint64(code[*ip : *ip+8])
+		value = binary.LittleEndian.Uint64(code[position : position+8])
 		*ip += 8
 	default:
 		value = 0
@@ -155,7 +157,7 @@ func (code CodeMemory) ReadImmediate(ip *int, kind ValueKind) (value uint64) {
 	return
 }
 
-func (code CodeMemory) ReadImmediateChecked(ip *int, kind ValueKind) (uint64, VMStatus) {
+func (code CodeMemory) ReadImmediateChecked(ip *uint32, kind ValueKind) (uint64, VMStatus) {
 	if ip == nil {
 		return 0, VMStatusInvalidAddress
 	}
@@ -163,35 +165,35 @@ func (code CodeMemory) ReadImmediateChecked(ip *int, kind ValueKind) (uint64, VM
 	if size == 0 {
 		return 0, VMStatusInvalidValueKind
 	}
-	if *ip < 0 || *ip > len(code)-size {
+	if uint64(*ip)+uint64(size) > uint64(len(code)) {
 		return 0, VMStatusMalformedBytecode
 	}
 	return code.ReadImmediate(ip, kind), VMStatusOK
 }
 
-func (code *CodeMemory) AppendInt(value int) {
+func (code *CodeMemory) AppendUint32(value uint32) {
 	start := len(*code)
 	*code = append(*code, 0, 0, 0, 0)
-	binary.LittleEndian.PutUint32((*code)[start:start+4], uint32(value))
+	binary.LittleEndian.PutUint32((*code)[start:start+4], value)
 }
 
-func (code CodeMemory) PatchInt(position int, value int) {
-	binary.LittleEndian.PutUint32(code[position:position+4], uint32(value))
+func (code CodeMemory) PatchUint32(position int, value uint32) {
+	binary.LittleEndian.PutUint32(code[position:position+4], value)
 }
 
-func (code CodeMemory) ReadInt(ip *int) int {
-	value := int(int32(binary.LittleEndian.Uint32(code[*ip : *ip+4])))
+func (code CodeMemory) ReadUint32(ip *uint32) uint32 {
+	position := int(*ip)
+	value := binary.LittleEndian.Uint32(code[position : position+4])
 	*ip += 4
 	return value
 }
 
-func (code CodeMemory) ReadIntChecked(ip *int) (int, VMStatus) {
+func (code CodeMemory) ReadUint32Checked(ip *uint32) (uint32, VMStatus) {
 	if ip == nil {
 		return 0, VMStatusInvalidAddress
 	}
-	if *ip < 0 || *ip > len(code)-4 {
+	if uint64(*ip)+4 > uint64(len(code)) {
 		return 0, VMStatusMalformedBytecode
 	}
-	return code.ReadInt(ip), VMStatusOK
+	return code.ReadUint32(ip), VMStatusOK
 }
-

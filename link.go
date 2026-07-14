@@ -21,31 +21,39 @@ func (linker *Linker) Link(program *ProgramNode, compiled *RelocatableProgram) (
 	if linker == nil {
 		return nil, fmt.Errorf("link error: linker is nil")
 	}
+	if linker.VariableCapacity < 0 {
+		return nil, fmt.Errorf("link error: variable capacity %d is negative", linker.VariableCapacity)
+	}
+	if linker.FunctionCapacity < 0 {
+		return nil, fmt.Errorf("link error: function capacity %d is negative", linker.FunctionCapacity)
+	}
 
 	for _, binding := range compiled.ProgramSymbols.ExternSymbols {
-		if binding.ByteOffset < 0 || binding.ByteOffset+binding.ByteSize > linker.VariableCapacity {
-			return nil, fmt.Errorf("link error: extern variable %q requests byte range [%d,%d), but extern memory capacity is %d", binding.Name, binding.ByteOffset, binding.ByteOffset+binding.ByteSize, linker.VariableCapacity)
+		byteOffset := int(binding.ByteOffset)
+		byteSize := int(binding.ByteSize)
+		if byteOffset+byteSize > linker.VariableCapacity {
+			return nil, fmt.Errorf("link error: extern variable %q requests byte range [%d,%d), but extern memory capacity is %d", binding.Name, byteOffset, byteOffset+byteSize, linker.VariableCapacity)
 		}
 		if binding.ByteAlignment > 1 && binding.ByteOffset%binding.ByteAlignment != 0 {
-			return nil, fmt.Errorf("link error: extern variable %q byte offset %d is not aligned to %d", binding.Name, binding.ByteOffset, binding.ByteAlignment)
+			return nil, fmt.Errorf("link error: extern variable %q byte offset %d is not aligned to %d", binding.Name, byteOffset, binding.ByteAlignment)
 		}
 	}
 
-	tempToFunction := make(map[int]int, len(compiled.Functions))
+	tempToFunction := make(map[uint32]int, len(compiled.Functions))
 	functions := make([]ScriptFunctionDescriptor, 0, len(compiled.Functions))
 	paramKinds := make([]ValueKind, 0)
-	paramOffsets := make([]int, 0)
+	paramOffsets := make([]uint32, 0)
 	for _, binding := range compiled.Functions {
 		switch binding.Scope {
 		case ScopeExtern:
-			if binding.SlotIndex < 0 || binding.SlotIndex >= linker.FunctionCapacity {
+			if int(binding.SlotIndex) >= linker.FunctionCapacity {
 				return nil, fmt.Errorf("link error: host-linked function %q requests slot %d, but function capacity is %d", binding.Name, binding.SlotIndex, linker.FunctionCapacity)
 			}
 		case ScopeBSS:
-			if binding.ParamCount != len(binding.ParamTypes) || binding.ParamCount != len(binding.ParamOffsets) {
+			if binding.ParamCount != lenu32(binding.ParamTypes) || binding.ParamCount != lenu32(binding.ParamOffsets) {
 				return nil, fmt.Errorf("link error: function %q has inconsistent parameter metadata", binding.Name)
 			}
-			paramStart := len(paramKinds)
+			paramStart := lenu32(paramKinds)
 			for index, typ := range binding.ParamTypes {
 				kind := valueKindFromType(typ)
 				if kind == KindNone || kind == KindVoid {
@@ -73,17 +81,16 @@ func (linker *Linker) Link(program *ProgramNode, compiled *RelocatableProgram) (
 		if !ok {
 			return nil, fmt.Errorf("link error on line %d: unresolved function id %d", patch.Line, patch.TempFuncID)
 		}
-		linkedText.PatchInt(patch.OperandPos, functionIndex)
+		linkedText.PatchUint32(patch.OperandPos, uint32(functionIndex))
 	}
 
 	entryPoint, ok := tempToFunction[compiled.EntryFunction]
 	if !ok {
 		return nil, fmt.Errorf("link error: entry function id %d was not finalized", compiled.EntryFunction)
 	}
-
 	linked := &LinkedProgram{
 		Text:          linkedText,
-		EntryPoint:    entryPoint,
+		EntryPoint:    uint32(entryPoint),
 		Functions:     functions,
 		ParamKinds:    paramKinds,
 		ParamOffsets:  paramOffsets,

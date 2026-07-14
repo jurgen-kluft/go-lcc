@@ -77,7 +77,7 @@ func TestLoadDoesNotRejectHostExecutionCapacities(t *testing.T) {
 func TestExternDispatcherReceivesContextAndHostFailureIsPreserved(t *testing.T) {
 	var code CodeMemory
 	code.AppendInstruction(makeInstruction(OpCallExtern, KindNone, ModeNone, FlagNone))
-	code.AppendInt(7)
+	code.AppendUint32(7)
 	code.AppendInstruction(makeInstruction(OpRet, KindNone, ModeNone, FlagNone))
 	program := &LinkedProgram{
 		Text:       code,
@@ -99,5 +99,37 @@ func TestExternDispatcherReceivesContextAndHostFailureIsPreserved(t *testing.T) 
 	fault := vm.FaultInfo()
 	if fault.Status != VMStatusHostFailure || fault.HostStatus != VMStatusInvalidParameter || fault.Target != 7 || fault.PC != 0 {
 		t.Fatalf("unexpected host fault details: %+v", fault)
+	}
+}
+
+func TestOpOffsetRejectsAddressIndexUnderflowAndOverflow(t *testing.T) {
+	tests := []struct {
+		name   string
+		base   uint32
+		offset int32
+	}{
+		{name: "underflow", base: 0, offset: -1},
+		{name: "overflow", base: addressIndexMask, offset: 1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var code CodeMemory
+			code.AppendInstruction(makeAddrInstruction(segmentData))
+			code.AppendUint32(test.base)
+			code.AppendInstruction(makeInstruction(OpPush, KindInt32, ModeNone, FlagNone))
+			code.AppendImmediate(KindInt32, uint64(uint32(test.offset)))
+			code.AppendInstruction(makeInstruction(OpOffset, KindNone, ModeNone, FlagNone))
+			code.AppendInstruction(makeInstruction(OpRet, KindNone, ModeNone, FlagNone))
+
+			program := &LinkedProgram{
+				Text:       code,
+				EntryPoint: 0,
+				Functions:  []ScriptFunctionDescriptor{{BodyAddress: 0, ReturnKind: KindAddress}},
+			}
+			if status := NewVM(0).Run(program); status != VMStatusInvalidAddress {
+				t.Fatalf("Run status = %s, want invalid address", status)
+			}
+		})
 	}
 }

@@ -16,7 +16,7 @@ func TestCheckedCodeReadersRejectTruncatedInput(t *testing.T) {
 		{
 			name: "instruction",
 			read: func(code CodeMemory) VMStatus {
-				ip := 0
+				var ip uint32
 				_, status := code.ReadInstructionChecked(&ip)
 				return status
 			},
@@ -24,7 +24,7 @@ func TestCheckedCodeReadersRejectTruncatedInput(t *testing.T) {
 		{
 			name: "immediate",
 			read: func(code CodeMemory) VMStatus {
-				ip := 0
+				var ip uint32
 				_, status := code.ReadImmediateChecked(&ip, KindUint32)
 				return status
 			},
@@ -32,8 +32,8 @@ func TestCheckedCodeReadersRejectTruncatedInput(t *testing.T) {
 		{
 			name: "int operand",
 			read: func(code CodeMemory) VMStatus {
-				ip := 0
-				_, status := code.ReadIntChecked(&ip)
+				var ip uint32
+				_, status := code.ReadUint32Checked(&ip)
 				return status
 			},
 		},

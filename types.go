@@ -271,7 +271,7 @@ const (
 	KindCount
 )
 
-var valueKindSize = [KindCount]int{
+var valueKindSize = [KindCount]uint32{
 	KindNone: 0, KindVoid: 0,
 	KindBool: 1, KindByte: 1,
 	KindInt8: 1, KindInt16: 2, KindInt32: 4, KindInt64: 8,
@@ -280,7 +280,7 @@ var valueKindSize = [KindCount]int{
 	KindAddress: 4, // Assuming a 32-bit address space
 }
 
-func (kind ValueKind) Size() int {
+func (kind ValueKind) Size() uint32 {
 	if kind >= KindCount {
 		return 0
 	}
@@ -318,30 +318,30 @@ type SymbolBinding struct {
 	Kind           DeclKind
 	Scope          ScopeKind
 	Type           *Type
-	SlotIndex      int
-	ByteOffset     int
-	ByteSize       int
-	ByteAlignment  int
-	ParamCount     int
+	SlotIndex      uint32
+	ByteOffset     uint32
+	ByteSize       uint32
+	ByteAlignment  uint32
+	ParamCount     uint32
 	ParamTypes     []*Type
-	ParamOffsets   []int
-	FrameSlotCount int
-	FrameByteSize  int
-	TempFuncID     int
-	ScriptAddress  int
+	ParamOffsets   []uint32
+	FrameSlotCount uint32
+	FrameByteSize  uint32
+	TempFuncID     uint32
+	ScriptAddress  uint32
 }
 
 type CallPatch struct {
 	OperandPos int
-	TempFuncID int
+	TempFuncID uint32
 	Line       int
 }
 
 type ScriptFunctionDescriptor struct {
-	BodyAddress   int
-	ParamStart    int
-	ParamCount    int
-	FrameByteSize int
+	BodyAddress   uint32
+	ParamStart    uint32
+	ParamCount    uint32
+	FrameByteSize uint32
 	ReturnKind    ValueKind
 }
 
@@ -379,18 +379,18 @@ func CopyProgramSymbols(src *ProgramSymbols) *ProgramSymbols {
 
 type LinkedProgram struct {
 	Text          CodeMemory
-	EntryPoint    int
+	EntryPoint    uint32
 	Functions     []ScriptFunctionDescriptor
 	ParamKinds    []ValueKind
-	ParamOffsets  []int
-	FrameSize     int
-	FrameByteSize int
-	ConstByteSize int
+	ParamOffsets  []uint32
+	FrameSize     uint32
+	FrameByteSize uint32
+	ConstByteSize uint32
 	ConstData     []byte
-	DataByteSize  int
+	DataByteSize  uint32
 	DataData      []byte
-	BSSSize       int
-	BSSByteSize   int
+	BSSSize       uint32
+	BSSByteSize   uint32
 	DebugSymbols  *ProgramSymbols
 }
 
@@ -399,15 +399,15 @@ type RelocatableProgram struct {
 	ProgramSymbols *ProgramSymbols
 	Functions      []SymbolBinding
 	CallPatches    []CallPatch
-	EntryFunction  int
-	FrameSize      int
-	FrameByteSize  int
-	ConstByteSize  int
+	EntryFunction  uint32
+	FrameSize      uint32
+	FrameByteSize  uint32
+	ConstByteSize  uint32
 	ConstData      []byte
-	DataByteSize   int
+	DataByteSize   uint32
 	DataData       []byte
-	BSSSize        int
-	BSSByteSize    int
+	BSSSize        uint32
+	BSSByteSize    uint32
 }
 
 func alignUp(offset int, alignment int) int {
@@ -416,4 +416,16 @@ func alignUp(offset int, alignment int) int {
 	}
 	mask := alignment - 1
 	return (offset + mask) &^ mask
+}
+
+func alignUpU32(offset uint32, alignment uint32) uint32 {
+	if alignment <= 1 {
+		return offset
+	}
+	mask := alignment - 1
+	return (offset + mask) &^ mask
+}
+
+func lenu32[S ~[]E, E any](values S) uint32 {
+	return uint32(len(values))
 }
