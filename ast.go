@@ -40,7 +40,7 @@ type AstExprNode interface {
 
 type AstLvalueNode interface {
 	AstExprNode
-	astEmitAddress(code *CodeMemory, c *Compiler)
+	astEmitAddress(compiler *functionCompiler)
 }
 
 type AstBlockStmt struct {

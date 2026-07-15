@@ -31,10 +31,28 @@ type compiledFunctionBlock struct {
 	callPatches             []CallPatch
 	jumpOperandPositions    []int
 	usedExternalFunctionIDs []uint32
+	callGraphState          callGraphState
+}
+
+type functionCompiler struct {
+	symbolBindings          map[string]SymbolBinding
+	constImage              *[]byte
+	stringLiteralOffsets    map[string]uint32
+	code                    CodeMemory
+	callPatches             []CallPatch
+	jumpOperandPositions    []int
+	usedExternalFunctionIDs []uint32
+	localSlots              map[string]uint32
+	localTypes              map[string]*Type
+	returnType              *Type
+	frameByteSize           uint32
+	localSlotCount          uint32
+	controlStack            []controlFrame
+	localScopeStack         []map[string]struct{}
+	err                     error
 }
 
 type Compiler struct {
-	program                 *AstProgramNode
 	code                    CodeMemory
 	symbolBindings          map[string]SymbolBinding
 	externSymbols           []SymbolBinding
@@ -42,12 +60,6 @@ type Compiler struct {
 	dataSymbols             []SymbolBinding
 	constSymbols            []SymbolBinding
 	functions               []SymbolBinding
-	functionBindingByTemp   map[uint32]int
-	localSlots              map[string]uint32
-	localTypes              map[string]*Type
-	currentReturnType       *Type
-	currentFrameByteSize    uint32
-	localSlotCount          uint32
 	maxLocalSlots           uint32
 	maxFrameByteSize        uint32
 	bssByteSize             uint32
@@ -56,10 +68,7 @@ type Compiler struct {
 	hasEntryFunction        bool
 	nextTempFuncID          uint32
 	callPatches             []CallPatch
-	jumpOperandPositions    []int
 	usedExternalFunctionIDs []uint32
-	controlStack            []controlFrame
-	localScopeStack         []map[string]struct{}
 	constImage              []byte
 	dataImage               []byte
 	stringLiteralOffsets    map[string]uint32
@@ -68,16 +77,13 @@ type Compiler struct {
 
 func NewCompiler() *Compiler {
 	return &Compiler{
-		symbolBindings:        make(map[string]SymbolBinding),
-		functionBindingByTemp: make(map[uint32]int),
-		externSymbols:         make([]SymbolBinding, 256),
-		bssSymbols:            make([]SymbolBinding, 256),
-		dataSymbols:           make([]SymbolBinding, 256),
-		constSymbols:          make([]SymbolBinding, 0, 16),
-		functions:             make([]SymbolBinding, 256),
-		callPatches:           make([]CallPatch, 256),
-		controlStack:          make([]controlFrame, 32),
-		localScopeStack:       make([]map[string]struct{}, 0, 16),
+		symbolBindings: make(map[string]SymbolBinding),
+		externSymbols:  make([]SymbolBinding, 256),
+		bssSymbols:     make([]SymbolBinding, 256),
+		dataSymbols:    make([]SymbolBinding, 256),
+		constSymbols:   make([]SymbolBinding, 0, 16),
+		functions:      make([]SymbolBinding, 256),
+		callPatches:    make([]CallPatch, 256),
 	}
 }
 
@@ -121,17 +127,6 @@ func parameterTypes(params []AstParameter) []*Type {
 	return types
 }
 
-func valueKindsFromTypes(types []*Type) []ValueKind {
-	if len(types) == 0 {
-		return nil
-	}
-	kinds := make([]ValueKind, 0, len(types))
-	for _, typ := range types {
-		kinds = append(kinds, valueKindFromType(typ))
-	}
-	return kinds
-}
-
 func (compiler *Compiler) Compile(program *AstProgramNode) (*RelocatableProgram, error) {
 	if program == nil {
 		return nil, fmt.Errorf("compile error: program is nil")
@@ -140,9 +135,6 @@ func (compiler *Compiler) Compile(program *AstProgramNode) (*RelocatableProgram,
 		return nil, fmt.Errorf("compile error: no function definitions found")
 	}
 
-	// TODO is it possible to estimate how large the code memory will become?
-
-	compiler.program = program
 	compiler.code = make(CodeMemory, 0, 8192)
 	compiler.symbolBindings = make(map[string]SymbolBinding, len(program.Decls)+len(program.Functions))
 	compiler.externSymbols = compiler.externSymbols[:0]
@@ -150,12 +142,6 @@ func (compiler *Compiler) Compile(program *AstProgramNode) (*RelocatableProgram,
 	compiler.dataSymbols = compiler.dataSymbols[:0]
 	compiler.constSymbols = compiler.constSymbols[:0]
 	compiler.functions = compiler.functions[:0]
-	compiler.functionBindingByTemp = make(map[uint32]int, len(program.Functions))
-	compiler.localSlots = nil
-	compiler.localTypes = nil
-	compiler.currentReturnType = nil
-	compiler.currentFrameByteSize = 0
-	compiler.localSlotCount = 0
 	compiler.maxLocalSlots = 0
 	compiler.maxFrameByteSize = 0
 	compiler.bssByteSize = 0
@@ -164,10 +150,7 @@ func (compiler *Compiler) Compile(program *AstProgramNode) (*RelocatableProgram,
 	compiler.hasEntryFunction = false
 	compiler.nextTempFuncID = 0
 	compiler.callPatches = compiler.callPatches[:0]
-	compiler.jumpOperandPositions = compiler.jumpOperandPositions[:0]
 	compiler.usedExternalFunctionIDs = compiler.usedExternalFunctionIDs[:0]
-	compiler.controlStack = compiler.controlStack[:0]
-	compiler.localScopeStack = compiler.localScopeStack[:0]
 	compiler.constImage = compiler.constImage[:0]
 	compiler.dataImage = compiler.dataImage[:0]
 	compiler.stringLiteralOffsets = make(map[string]uint32)
@@ -203,27 +186,16 @@ func (compiler *Compiler) Compile(program *AstProgramNode) (*RelocatableProgram,
 	}
 	blocks := make([]compiledFunctionBlock, 0, len(program.Functions))
 	for _, function := range program.Functions {
-		compiler.code = compiler.code[:0]
-		compiler.callPatches = compiler.callPatches[:0]
-		compiler.jumpOperandPositions = compiler.jumpOperandPositions[:0]
-		compiler.usedExternalFunctionIDs = compiler.usedExternalFunctionIDs[:0]
-		compiler.compileFunction(function)
-		if compiler.err != nil {
-			return nil, compiler.err
+		block, err := compiler.compileFunction(function)
+		if err != nil {
+			return nil, err
 		}
-		blocks = append(blocks, compiledFunctionBlock{
-			binding:                 compiler.symbolBindings[function.Name],
-			code:                    compiler.code.Clone(),
-			callPatches:             append([]CallPatch(nil), compiler.callPatches...),
-			jumpOperandPositions:    append([]int(nil), compiler.jumpOperandPositions...),
-			usedExternalFunctionIDs: append([]uint32(nil), compiler.usedExternalFunctionIDs...),
-		})
+		blocks = append(blocks, block)
 	}
-	reachableFunctions, err := compiler.reachableFunctionIDs(blocks)
-	if err != nil {
+	if err := compiler.markReachableFunctions(blocks); err != nil {
 		return nil, err
 	}
-	if err := compiler.assembleFunctionBlocks(blocks, reachableFunctions); err != nil {
+	if err := compiler.assembleFunctionBlocks(blocks); err != nil {
 		return nil, err
 	}
 
@@ -264,42 +236,43 @@ func (compiler *Compiler) Compile(program *AstProgramNode) (*RelocatableProgram,
 	return compiled, nil
 }
 
-func (compiler *Compiler) reachableFunctionIDs(blocks []compiledFunctionBlock) (map[uint32]struct{}, error) {
-	blocksByID := make(map[uint32]compiledFunctionBlock, len(blocks))
-	for _, block := range blocks {
+func (compiler *Compiler) markReachableFunctions(blocks []compiledFunctionBlock) error {
+	blocksByID := make(map[uint32]*compiledFunctionBlock, len(blocks))
+	for index := range blocks {
+		block := &blocks[index]
 		blocksByID[block.binding.TempFuncID] = block
 	}
-	reachable := make(map[uint32]struct{}, len(blocks))
-	states := make(map[uint32]callGraphState, len(blocks))
-	var visit func(tempFuncID uint32) error
-	visit = func(tempFuncID uint32) error {
-		switch states[tempFuncID] {
-		case callGraphVisited:
-			return nil
-		case callGraphVisiting:
-			return fmt.Errorf("compile error: recursive script call cycle detected at function %q", blocksByID[tempFuncID].binding.Name)
-		}
-		block, ok := blocksByID[tempFuncID]
-		if !ok {
-			return fmt.Errorf("compile error: unknown script function id %d", tempFuncID)
-		}
-		reachable[tempFuncID] = struct{}{}
-		states[tempFuncID] = callGraphVisiting
-		for _, patch := range block.callPatches {
-			if err := visit(patch.TempFuncID); err != nil {
-				return err
-			}
-		}
-		states[tempFuncID] = callGraphVisited
-		return nil
+	entry, ok := blocksByID[compiler.entryFunction]
+	if !ok {
+		return fmt.Errorf("compile error: unknown script function id %d", compiler.entryFunction)
 	}
-	if err := visit(compiler.entryFunction); err != nil {
-		return nil, err
-	}
-	return reachable, nil
+	return entry.markReachable(blocksByID)
 }
 
-func (compiler *Compiler) assembleFunctionBlocks(blocks []compiledFunctionBlock, reachable map[uint32]struct{}) error {
+// markReachable follows the direct local calls recorded while compiling this
+// block. A block is retained only when this traversal reaches it from the entry.
+func (block *compiledFunctionBlock) markReachable(blocksByID map[uint32]*compiledFunctionBlock) error {
+	switch block.callGraphState {
+	case callGraphVisited:
+		return nil
+	case callGraphVisiting:
+		return fmt.Errorf("compile error: recursive script call cycle detected at function %q", block.binding.Name)
+	}
+	block.callGraphState = callGraphVisiting
+	for _, patch := range block.callPatches {
+		callee, ok := blocksByID[patch.TempFuncID]
+		if !ok {
+			return fmt.Errorf("compile error: unknown script function id %d", patch.TempFuncID)
+		}
+		if err := callee.markReachable(blocksByID); err != nil {
+			return err
+		}
+	}
+	block.callGraphState = callGraphVisited
+	return nil
+}
+
+func (compiler *Compiler) assembleFunctionBlocks(blocks []compiledFunctionBlock) error {
 	finalCode := make(CodeMemory, 0, 8192)
 	finalPatches := make([]CallPatch, 0)
 	usedExternalIDs := make([]uint32, 0)
@@ -316,7 +289,7 @@ func (compiler *Compiler) assembleFunctionBlocks(blocks []compiledFunctionBlock,
 	compiler.maxFrameByteSize = 0
 
 	for _, block := range blocks {
-		if _, keep := reachable[block.binding.TempFuncID]; !keep {
+		if block.callGraphState != callGraphVisited {
 			continue
 		}
 		base := len(finalCode)
@@ -364,10 +337,6 @@ func (compiler *Compiler) assembleFunctionBlocks(blocks []compiledFunctionBlock,
 	compiler.callPatches = finalPatches
 	compiler.usedExternalFunctionIDs = usedExternalIDs
 	compiler.functions = retainedFunctions
-	compiler.functionBindingByTemp = make(map[uint32]int, len(retainedFunctions))
-	for index, binding := range retainedFunctions {
-		compiler.functionBindingByTemp[binding.TempFuncID] = index
-	}
 	return nil
 }
 
@@ -481,78 +450,61 @@ func (compiler *Compiler) allocateTempFuncID() uint32 {
 }
 
 func (compiler *Compiler) trackFunctionBinding(binding SymbolBinding) {
-	compiler.functionBindingByTemp[binding.TempFuncID] = len(compiler.functions)
 	compiler.functions = append(compiler.functions, binding)
 }
 
-func (compiler *Compiler) compileFunction(function *AstFunctionNode) {
-	if compiler.err != nil || function == nil {
-		return
+func (compiler *Compiler) compileFunction(function *AstFunctionNode) (compiledFunctionBlock, error) {
+	if function == nil {
+		return compiledFunctionBlock{}, fmt.Errorf("compile error: function is nil")
 	}
 	binding, ok := compiler.symbolBindings[function.Name]
 	if !ok || binding.Kind != DeclFunction {
-		compiler.fail(fmt.Errorf("compile error on line %d: unknown function %q", function.Line, function.Name))
-		return
+		return compiledFunctionBlock{}, fmt.Errorf("compile error on line %d: unknown function %q", function.Line, function.Name)
 	}
-	scriptAddress, ok := imageUint32FromInt(len(compiler.code))
-	if !ok {
-		compiler.fail(fmt.Errorf("compile error on line %d: function %q code address %d exceeds uint32", function.Line, function.Name, len(compiler.code)))
-		return
+	context := &functionCompiler{
+		symbolBindings:       compiler.symbolBindings,
+		constImage:           &compiler.constImage,
+		stringLiteralOffsets: compiler.stringLiteralOffsets,
+		code:                 make(CodeMemory, 0, 256),
+		localSlots:           make(map[string]uint32, len(function.Params)),
+		localTypes:           make(map[string]*Type, len(function.Params)),
+		returnType:           function.ReturnType,
+		controlStack:         make([]controlFrame, 0, 8),
+		localScopeStack:      make([]map[string]struct{}, 0, 8),
 	}
-	binding.ScriptAddress = scriptAddress
-	compiler.localSlots = make(map[string]uint32, len(function.Params))
-	compiler.localTypes = make(map[string]*Type, len(function.Params))
-	compiler.currentReturnType = function.ReturnType
-	compiler.localScopeStack = compiler.localScopeStack[:0]
-	compiler.localSlotCount = 0
 	frameByteSize := uint32(0)
 	paramOffsets := make([]uint32, 0, len(function.Params))
 	for _, param := range function.Params {
-		if _, exists := compiler.localSlots[param.Name]; exists {
-			compiler.fail(fmt.Errorf("compile error on line %d: duplicate parameter %q", param.Line, param.Name))
-			return
+		if _, exists := context.localSlots[param.Name]; exists {
+			return compiledFunctionBlock{}, fmt.Errorf("compile error on line %d: duplicate parameter %q", param.Line, param.Name)
 		}
 		frameByteSize = alignUpU32(frameByteSize, uint32(param.Type.Alignment()))
-		compiler.localSlots[param.Name] = frameByteSize
-		compiler.localTypes[param.Name] = param.Type
+		context.localSlots[param.Name] = frameByteSize
+		context.localTypes[param.Name] = param.Type
 		paramOffsets = append(paramOffsets, frameByteSize)
-		compiler.localSlotCount++
+		context.localSlotCount++
 		frameByteSize += uint32(param.Type.Size)
 	}
 	binding.ParamOffsets = paramOffsets
-	binding.FrameSlotCount = compiler.localSlotCount
+	binding.FrameSlotCount = context.localSlotCount
 	binding.FrameByteSize = frameByteSize
-	compiler.currentFrameByteSize = frameByteSize
-	binding.ScriptAddress = scriptAddress
-	compiler.storeFunctionBinding(binding)
-	compiler.compileBlock(function.Body)
-	if compiler.err != nil {
-		return
+	context.frameByteSize = frameByteSize
+	context.compileBlock(function.Body)
+	if context.err != nil {
+		return compiledFunctionBlock{}, context.err
 	}
-	if len(compiler.code) == 0 || Opcode(compiler.code[len(compiler.code)-1]) != OpRet {
-		compiler.emit(OpRet)
+	if len(context.code) == 0 || Opcode(context.code[len(context.code)-1]) != OpRet {
+		context.emit(OpRet)
 	}
-	binding.FrameSlotCount = compiler.localSlotCount
-	binding.FrameByteSize = compiler.currentFrameByteSize
-	compiler.storeFunctionBinding(binding)
-	if compiler.localSlotCount > compiler.maxLocalSlots {
-		compiler.maxLocalSlots = compiler.localSlotCount
-	}
-	if compiler.currentFrameByteSize > compiler.maxFrameByteSize {
-		compiler.maxFrameByteSize = compiler.currentFrameByteSize
-	}
-	compiler.localSlots = nil
-	compiler.localTypes = nil
-	compiler.currentReturnType = nil
-	compiler.currentFrameByteSize = 0
-	compiler.localScopeStack = compiler.localScopeStack[:0]
-}
-
-func (compiler *Compiler) storeFunctionBinding(binding SymbolBinding) {
-	compiler.symbolBindings[binding.Name] = binding
-	if functionIndex, ok := compiler.functionBindingByTemp[binding.TempFuncID]; ok {
-		compiler.functions[functionIndex] = binding
-	}
+	binding.FrameSlotCount = context.localSlotCount
+	binding.FrameByteSize = context.frameByteSize
+	return compiledFunctionBlock{
+		binding:                 binding,
+		code:                    context.code,
+		callPatches:             context.callPatches,
+		jumpOperandPositions:    context.jumpOperandPositions,
+		usedExternalFunctionIDs: context.usedExternalFunctionIDs,
+	}, nil
 }
 
 func cloneBindingsMap(bindings map[string]SymbolBinding) map[string]SymbolBinding {
@@ -570,7 +522,7 @@ func cloneBindingsMap(bindings map[string]SymbolBinding) map[string]SymbolBindin
 	return clone
 }
 
-func (compiler *Compiler) exprType(expr AstExprNode) *Type {
+func (fc *functionCompiler) exprType(expr AstExprNode) *Type {
 	switch node := expr.(type) {
 	case *AstNumberLiteral:
 		if node.IsFloat {
@@ -583,15 +535,15 @@ func (compiler *Compiler) exprType(expr AstExprNode) *Type {
 	case *AstStringLiteral:
 		return PointerTo(QualifiedType(Uint8Type, true))
 	case *AstIdentNode:
-		if localType, ok := compiler.localTypes[node.Name]; ok {
+		if localType, ok := fc.localTypes[node.Name]; ok {
 			return localType
 		}
-		if binding, ok := compiler.symbolBindings[node.Name]; ok {
+		if binding, ok := fc.symbolBindings[node.Name]; ok {
 			return binding.Type
 		}
 	case *AstBinaryExpr:
-		left := compiler.exprType(node.Left)
-		right := compiler.exprType(node.Right)
+		left := fc.exprType(node.Left)
+		right := fc.exprType(node.Right)
 		switch node.Op {
 		case "&&", "||":
 			return BoolType
@@ -600,15 +552,15 @@ func (compiler *Compiler) exprType(expr AstExprNode) *Type {
 		}
 		return promoteNumericType(left, right)
 	case *AstCallExpr:
-		if binding, ok := compiler.symbolBindings[node.Callee]; ok {
+		if binding, ok := fc.symbolBindings[node.Callee]; ok {
 			return binding.Type
 		}
 	}
 	return nil
 }
 
-func (compiler *Compiler) compileExprAs(expr AstExprNode, expected *Type) {
-	if compiler.err != nil {
+func (fc *functionCompiler) compileExprAs(expr AstExprNode, expected *Type) {
+	if fc.err != nil {
 		return
 	}
 	kind := valueKindFromType(expected)
@@ -617,69 +569,69 @@ func (compiler *Compiler) compileExprAs(expr AstExprNode, expected *Type) {
 	}
 	switch node := expr.(type) {
 	case *AstNumberLiteral:
-		compiler.emitTyped(OpPush, kind)
-		compiler.code.AppendImmediate(kind, compiler.numberLiteralBits(node, kind))
+		fc.emitTyped(OpPush, kind)
+		fc.code.AppendImmediate(kind, fc.numberLiteralBits(node, kind))
 	case *AstStringLiteral:
-		if !compiler.canAssignStringLiteral(expected) {
-			compiler.fail(fmt.Errorf("compile error on line %d: string literal is not assignable to %v", node.Line, expected))
+		if !fc.canAssignStringLiteral(expected) {
+			fc.fail(fmt.Errorf("compile error on line %d: string literal is not assignable to %v", node.Line, expected))
 			return
 		}
-		compiler.emitInstruction(makeAddrInstruction(segmentConst))
-		compiler.code.AppendUint32(compiler.internStringLiteral(node.Value))
+		fc.emitInstruction(makeAddrInstruction(segmentConst))
+		fc.code.AppendUint32(fc.internStringLiteral(node.Value))
 	case *AstIdentNode:
 		actualKind := kind
-		if actual := compiler.exprType(expr); actual != nil {
+		if actual := fc.exprType(expr); actual != nil {
 			actualKind = valueKindFromType(actual)
 		}
 		if actualKind == KindNone {
 			actualKind = KindInt32
 		}
-		node.astEmitAddress(&compiler.code, compiler)
-		if compiler.err != nil {
+		node.astEmitAddress(fc)
+		if fc.err != nil {
 			return
 		}
-		compiler.emitTyped(OpDereference, actualKind)
-		compiler.emitConvertIfNeeded(actualKind, kind)
+		fc.emitTyped(OpDereference, actualKind)
+		fc.emitConvertIfNeeded(actualKind, kind)
 	case *AstBinaryExpr:
 		if node.Op == "&&" || node.Op == "||" {
-			compiler.compileLogicalExpr(node, kind)
+			fc.compileLogicalExpr(node, kind)
 			return
 		}
 		binaryType := expected
 		comparisonOp := isComparisonOperator(node.Op)
 		if comparisonOp {
-			binaryType = promoteNumericType(compiler.exprType(node.Left), compiler.exprType(node.Right))
+			binaryType = promoteNumericType(fc.exprType(node.Left), fc.exprType(node.Right))
 		}
 		if binaryType == nil {
-			binaryType = compiler.exprType(expr)
+			binaryType = fc.exprType(expr)
 		}
 		binaryKind := valueKindFromType(binaryType)
 		if binaryKind == KindNone {
 			binaryKind = KindInt32
 			binaryType = Int32Type
 		}
-		compiler.compileExprAs(node.Left, binaryType)
-		compiler.compileExprAs(node.Right, binaryType)
-		if compiler.err != nil {
+		fc.compileExprAs(node.Left, binaryType)
+		fc.compileExprAs(node.Right, binaryType)
+		if fc.err != nil {
 			return
 		}
 		switch node.Op {
 		case "+", "-", "*", "/":
-			compiler.emitArithmetic(node.Op, binaryKind)
+			fc.emitArithmetic(node.Op, binaryKind)
 		case "==", "!=", "<", ">", "<=", ">=":
-			compiler.emitComparison(node.Op, binaryKind)
-			compiler.emitConvertIfNeeded(KindBool, kind)
+			fc.emitComparison(node.Op, binaryKind)
+			fc.emitConvertIfNeeded(KindBool, kind)
 		default:
-			compiler.fail(fmt.Errorf("compile error on line %d: unsupported binary operator %q", node.Line, node.Op))
+			fc.fail(fmt.Errorf("compile error on line %d: unsupported binary operator %q", node.Line, node.Op))
 		}
 	case *AstCallExpr:
-		binding, ok := compiler.symbolBindings[node.Callee]
+		binding, ok := fc.symbolBindings[node.Callee]
 		if !ok || binding.Kind != DeclFunction {
-			compiler.fail(fmt.Errorf("compile error on line %d: unknown function %q", node.Line, node.Callee))
+			fc.fail(fmt.Errorf("compile error on line %d: unknown function %q", node.Line, node.Callee))
 			return
 		}
 		if lenU32(node.Args) != binding.ParamCount {
-			compiler.fail(fmt.Errorf("compile error on line %d: function %q expects %d arguments, got %d", node.Line, node.Callee, binding.ParamCount, len(node.Args)))
+			fc.fail(fmt.Errorf("compile error on line %d: function %q expects %d arguments, got %d", node.Line, node.Callee, binding.ParamCount, len(node.Args)))
 			return
 		}
 		for index, arg := range node.Args {
@@ -687,24 +639,24 @@ func (compiler *Compiler) compileExprAs(expr AstExprNode, expected *Type) {
 			if index < len(binding.ParamTypes) {
 				paramType = binding.ParamTypes[index]
 			}
-			compiler.compileExprAs(arg, paramType)
-			if compiler.err != nil {
+			fc.compileExprAs(arg, paramType)
+			if fc.err != nil {
 				return
 			}
 		}
 		if binding.Scope == ScopeExtern {
-			compiler.emitOpWithOperand(OpCallExtern, binding.SlotIndex)
-			compiler.usedExternalFunctionIDs = append(compiler.usedExternalFunctionIDs, binding.TempFuncID)
+			fc.emitOpWithOperand(OpCallExtern, binding.SlotIndex)
+			fc.usedExternalFunctionIDs = append(fc.usedExternalFunctionIDs, binding.TempFuncID)
 		} else {
-			operandPos := compiler.emitOpWithOperand(OpCall, binding.TempFuncID)
-			compiler.callPatches = append(compiler.callPatches, CallPatch{OperandPos: operandPos, TempFuncID: binding.TempFuncID, Line: node.Line})
+			operandPos := fc.emitOpWithOperand(OpCall, binding.TempFuncID)
+			fc.callPatches = append(fc.callPatches, CallPatch{OperandPos: operandPos, TempFuncID: binding.TempFuncID, Line: node.Line})
 		}
 		returnKind := valueKindFromType(binding.Type)
 		if returnKind != KindNone {
-			compiler.emitConvertIfNeeded(returnKind, kind)
+			fc.emitConvertIfNeeded(returnKind, kind)
 		}
 	default:
-		compiler.fail(fmt.Errorf("compile error: unsupported expression type %T", expr))
+		fc.fail(fmt.Errorf("compile error: unsupported expression type %T", expr))
 	}
 }
 
@@ -724,6 +676,25 @@ func (compiler *Compiler) internStringLiteral(value string) uint32 {
 	compiler.constImage = append(compiler.constImage, 0)
 	compiler.stringLiteralOffsets[value] = offset
 	return offset
+}
+
+func (fc *functionCompiler) canAssignStringLiteral(target *Type) bool {
+	return target != nil && target.Kind == TypePointer && target.Base != nil && target.Base.Kind == TypeUint8 && target.Base.IsConst
+}
+
+func (fc *functionCompiler) internStringLiteral(value string) uint32 {
+	if offset, ok := fc.stringLiteralOffsets[value]; ok {
+		return offset
+	}
+	offset := lenU32(*fc.constImage)
+	*fc.constImage = append(*fc.constImage, []byte(value)...)
+	*fc.constImage = append(*fc.constImage, 0)
+	fc.stringLiteralOffsets[value] = offset
+	return offset
+}
+
+func (fc *functionCompiler) numberLiteralBits(node *AstNumberLiteral, kind ValueKind) uint64 {
+	return numberLiteralBits(node, kind)
 }
 
 func (compiler *Compiler) ensureDataSize(size uint32) {
@@ -817,72 +788,72 @@ func (compiler *Compiler) globalInitializerBits(target *Type, expr AstExprNode, 
 	}
 }
 
-func (compiler *Compiler) compileLogicalExpr(node *AstBinaryExpr, expectedKind ValueKind) {
-	compiler.compileExprAs(node.Left, BoolType)
-	if compiler.err != nil {
+func (fc *functionCompiler) compileLogicalExpr(node *AstBinaryExpr, expectedKind ValueKind) {
+	fc.compileExprAs(node.Left, BoolType)
+	if fc.err != nil {
 		return
 	}
 
 	switch node.Op {
 	case "&&":
-		leftFalsePos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
-		compiler.compileExprAs(node.Right, BoolType)
-		if compiler.err != nil {
+		leftFalsePos := fc.emitOpWithOperand(OpJumpIfFalse, 0)
+		fc.compileExprAs(node.Right, BoolType)
+		if fc.err != nil {
 			return
 		}
-		rightFalsePos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
-		compiler.emitBooleanConstant(true)
-		endPos := compiler.emitOpWithOperand(OpJump, 0)
-		falsePos := len(compiler.code)
-		compiler.patchOperand(leftFalsePos, falsePos)
-		compiler.patchOperand(rightFalsePos, falsePos)
-		compiler.emitBooleanConstant(false)
-		compiler.patchOperand(endPos, len(compiler.code))
+		rightFalsePos := fc.emitOpWithOperand(OpJumpIfFalse, 0)
+		fc.emitBooleanConstant(true)
+		endPos := fc.emitOpWithOperand(OpJump, 0)
+		falsePos := len(fc.code)
+		fc.patchOperand(leftFalsePos, falsePos)
+		fc.patchOperand(rightFalsePos, falsePos)
+		fc.emitBooleanConstant(false)
+		fc.patchOperand(endPos, len(fc.code))
 	case "||":
-		leftFalsePos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
-		compiler.emitBooleanConstant(true)
-		leftEndPos := compiler.emitOpWithOperand(OpJump, 0)
-		rightStart := len(compiler.code)
-		compiler.patchOperand(leftFalsePos, rightStart)
-		compiler.compileExprAs(node.Right, BoolType)
-		if compiler.err != nil {
+		leftFalsePos := fc.emitOpWithOperand(OpJumpIfFalse, 0)
+		fc.emitBooleanConstant(true)
+		leftEndPos := fc.emitOpWithOperand(OpJump, 0)
+		rightStart := len(fc.code)
+		fc.patchOperand(leftFalsePos, rightStart)
+		fc.compileExprAs(node.Right, BoolType)
+		if fc.err != nil {
 			return
 		}
-		rightFalsePos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
-		compiler.emitBooleanConstant(true)
-		rightEndPos := compiler.emitOpWithOperand(OpJump, 0)
-		falsePos := len(compiler.code)
-		compiler.patchOperand(rightFalsePos, falsePos)
-		compiler.emitBooleanConstant(false)
-		end := len(compiler.code)
-		compiler.patchOperand(leftEndPos, end)
-		compiler.patchOperand(rightEndPos, end)
+		rightFalsePos := fc.emitOpWithOperand(OpJumpIfFalse, 0)
+		fc.emitBooleanConstant(true)
+		rightEndPos := fc.emitOpWithOperand(OpJump, 0)
+		falsePos := len(fc.code)
+		fc.patchOperand(rightFalsePos, falsePos)
+		fc.emitBooleanConstant(false)
+		end := len(fc.code)
+		fc.patchOperand(leftEndPos, end)
+		fc.patchOperand(rightEndPos, end)
 	default:
-		compiler.fail(fmt.Errorf("compile error on line %d: unsupported logical operator %q", node.Line, node.Op))
+		fc.fail(fmt.Errorf("compile error on line %d: unsupported logical operator %q", node.Line, node.Op))
 		return
 	}
 
-	compiler.emitConvertIfNeeded(KindBool, expectedKind)
+	fc.emitConvertIfNeeded(KindBool, expectedKind)
 }
 
-func (compiler *Compiler) emitBooleanConstant(value bool) {
-	compiler.emitTyped(OpPush, KindBool)
+func (fc *functionCompiler) emitBooleanConstant(value bool) {
+	fc.emitTyped(OpPush, KindBool)
 	if value {
-		compiler.code.AppendImmediate(KindBool, 1)
+		fc.code.AppendImmediate(KindBool, 1)
 		return
 	}
-	compiler.code.AppendImmediate(KindBool, 0)
+	fc.code.AppendImmediate(KindBool, 0)
 }
 
-func (compiler *Compiler) emitConvertIfNeeded(from ValueKind, to ValueKind) {
-	if compiler.err != nil || from == to || to == KindNone || from == KindNone {
+func (fc *functionCompiler) emitConvertIfNeeded(from ValueKind, to ValueKind) {
+	if fc.err != nil || from == to || to == KindNone || from == KindNone {
 		return
 	}
 	if !isNumericKind(from) || !isNumericKind(to) {
-		compiler.fail(fmt.Errorf("compile error: unsupported conversion from kind %d to kind %d", from, to))
+		fc.fail(fmt.Errorf("compile error: unsupported conversion from kind %d to kind %d", from, to))
 		return
 	}
-	compiler.code.AppendInstruction(makeConvertInstruction(from, to))
+	fc.code.AppendInstruction(makeConvertInstruction(from, to))
 }
 
 func isNumericKind(kind ValueKind) bool {
@@ -929,6 +900,10 @@ func promoteNumericType(left *Type, right *Type) *Type {
 }
 
 func (compiler *Compiler) numberLiteralBits(node *AstNumberLiteral, kind ValueKind) uint64 {
+	return numberLiteralBits(node, kind)
+}
+
+func numberLiteralBits(node *AstNumberLiteral, kind ValueKind) uint64 {
 	if node == nil {
 		return 0
 	}
@@ -962,196 +937,196 @@ func (compiler *Compiler) numberLiteralBits(node *AstNumberLiteral, kind ValueKi
 	}
 }
 
-func (compiler *Compiler) compileBlock(block *AstBlockStmt) {
+func (fc *functionCompiler) compileBlock(block *AstBlockStmt) {
 	if block == nil {
 		return
 	}
-	savedSlots := cloneUint32Map(compiler.localSlots)
-	savedTypes := cloneTypeMap(compiler.localTypes)
-	compiler.localScopeStack = append(compiler.localScopeStack, make(map[string]struct{}))
+	savedSlots := cloneUint32Map(fc.localSlots)
+	savedTypes := cloneTypeMap(fc.localTypes)
+	fc.localScopeStack = append(fc.localScopeStack, make(map[string]struct{}))
 	defer func() {
-		compiler.localSlots = savedSlots
-		compiler.localTypes = savedTypes
-		compiler.localScopeStack = compiler.localScopeStack[:len(compiler.localScopeStack)-1]
+		fc.localSlots = savedSlots
+		fc.localTypes = savedTypes
+		fc.localScopeStack = fc.localScopeStack[:len(fc.localScopeStack)-1]
 	}()
 	for _, stmt := range block.Statements {
-		compiler.compileStmt(stmt)
-		if compiler.err != nil {
+		fc.compileStmt(stmt)
+		if fc.err != nil {
 			return
 		}
 	}
 }
 
-func (compiler *Compiler) compileStmt(stmt AstStmtNode) {
-	if compiler.err != nil {
+func (fc *functionCompiler) compileStmt(stmt AstStmtNode) {
+	if fc.err != nil {
 		return
 	}
 
 	switch node := stmt.(type) {
 	case *AstBlockStmt:
-		compiler.compileBlock(node)
+		fc.compileBlock(node)
 	case *AstLocalDeclStmt:
-		compiler.compileLocalDecl(node)
+		fc.compileLocalDecl(node)
 	case *AstIfStmt:
-		compiler.compileExprAs(node.Condition, BoolType)
-		jumpPos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
-		compiler.compileStmt(node.Then)
+		fc.compileExprAs(node.Condition, BoolType)
+		jumpPos := fc.emitOpWithOperand(OpJumpIfFalse, 0)
+		fc.compileStmt(node.Then)
 		if node.Else == nil {
-			compiler.patchOperand(jumpPos, len(compiler.code))
+			fc.patchOperand(jumpPos, len(fc.code))
 			break
 		}
-		skipElsePos := compiler.emitOpWithOperand(OpJump, 0)
-		compiler.patchOperand(jumpPos, len(compiler.code))
-		compiler.compileStmt(node.Else)
-		compiler.patchOperand(skipElsePos, len(compiler.code))
+		skipElsePos := fc.emitOpWithOperand(OpJump, 0)
+		fc.patchOperand(jumpPos, len(fc.code))
+		fc.compileStmt(node.Else)
+		fc.patchOperand(skipElsePos, len(fc.code))
 	case *AstWhileStmt:
-		loopStart := len(compiler.code)
-		compiler.compileExprAs(node.Condition, BoolType)
-		exitPos := compiler.emitOpWithOperand(OpJumpIfFalse, 0)
-		compiler.controlStack = append(compiler.controlStack, controlFrame{allowsContinue: true, continueTarget: loopStart})
-		compiler.compileStmt(node.Body)
-		compiler.patchCurrentContinues(loopStart)
-		compiler.emitOpWithOperand(OpJump, uint32(loopStart))
-		loopEnd := len(compiler.code)
-		compiler.patchOperand(exitPos, loopEnd)
-		compiler.patchCurrentBreaks(loopEnd)
-		compiler.controlStack = compiler.controlStack[:len(compiler.controlStack)-1]
+		loopStart := len(fc.code)
+		fc.compileExprAs(node.Condition, BoolType)
+		exitPos := fc.emitOpWithOperand(OpJumpIfFalse, 0)
+		fc.controlStack = append(fc.controlStack, controlFrame{allowsContinue: true, continueTarget: loopStart})
+		fc.compileStmt(node.Body)
+		fc.patchCurrentContinues(loopStart)
+		fc.emitOpWithOperand(OpJump, uint32(loopStart))
+		loopEnd := len(fc.code)
+		fc.patchOperand(exitPos, loopEnd)
+		fc.patchCurrentBreaks(loopEnd)
+		fc.controlStack = fc.controlStack[:len(fc.controlStack)-1]
 	case *AstForStmt:
 		if node.Init != nil {
-			compiler.compileStmt(node.Init)
+			fc.compileStmt(node.Init)
 		}
-		loopStart := len(compiler.code)
+		loopStart := len(fc.code)
 		exitPos := -1
 		if node.Condition != nil {
-			compiler.compileExprAs(node.Condition, BoolType)
-			exitPos = compiler.emitOpWithOperand(OpJumpIfFalse, 0)
+			fc.compileExprAs(node.Condition, BoolType)
+			exitPos = fc.emitOpWithOperand(OpJumpIfFalse, 0)
 		}
-		compiler.controlStack = append(compiler.controlStack, controlFrame{allowsContinue: true, continueTarget: -1})
-		compiler.compileStmt(node.Body)
-		postStart := len(compiler.code)
-		compiler.controlStack[len(compiler.controlStack)-1].continueTarget = postStart
-		compiler.patchCurrentContinues(postStart)
+		fc.controlStack = append(fc.controlStack, controlFrame{allowsContinue: true, continueTarget: -1})
+		fc.compileStmt(node.Body)
+		postStart := len(fc.code)
+		fc.controlStack[len(fc.controlStack)-1].continueTarget = postStart
+		fc.patchCurrentContinues(postStart)
 		if node.Post != nil {
-			compiler.compileStmt(node.Post)
+			fc.compileStmt(node.Post)
 		}
-		compiler.emitOpWithOperand(OpJump, uint32(loopStart))
-		loopEnd := len(compiler.code)
+		fc.emitOpWithOperand(OpJump, uint32(loopStart))
+		loopEnd := len(fc.code)
 		if exitPos >= 0 {
-			compiler.patchOperand(exitPos, loopEnd)
+			fc.patchOperand(exitPos, loopEnd)
 		}
-		compiler.patchCurrentBreaks(loopEnd)
-		compiler.controlStack = compiler.controlStack[:len(compiler.controlStack)-1]
+		fc.patchCurrentBreaks(loopEnd)
+		fc.controlStack = fc.controlStack[:len(fc.controlStack)-1]
 	case *AstSwitchStmt:
-		compiler.compileSwitchStmt(node)
+		fc.compileSwitchStmt(node)
 	case *AstReturnStmt:
 		if node.Value != nil {
-			compiler.compileExprAs(node.Value, compiler.currentReturnType)
+			fc.compileExprAs(node.Value, fc.returnType)
 		}
-		compiler.emit(OpRet)
+		fc.emit(OpRet)
 	case *AstExprStmt:
 		if _, ok := node.Expr.(*AstCallExpr); !ok {
-			compiler.fail(fmt.Errorf("compile error on line %d: only function call expressions can be used as standalone statements", node.Line))
+			fc.fail(fmt.Errorf("compile error on line %d: only function call expressions can be used as standalone statements", node.Line))
 			return
 		}
-		compiler.compileExpr(node.Expr)
+		fc.compileExpr(node.Expr)
 	case *AstAssignStmt:
-		if compiler.rejectConstAssignment(node.Target, node.Line) {
+		if fc.rejectConstAssignment(node.Target, node.Line) {
 			return
 		}
-		targetType := compiler.exprType(node.Target)
-		compiler.compileExprAs(node.Value, targetType)
-		node.Target.astEmitAddress(&compiler.code, compiler)
-		if compiler.err != nil {
+		targetType := fc.exprType(node.Target)
+		fc.compileExprAs(node.Value, targetType)
+		node.Target.astEmitAddress(fc)
+		if fc.err != nil {
 			return
 		}
 		assignKind := valueKindFromType(targetType)
 		if assignKind == KindNone {
 			assignKind = KindInt32
 		}
-		compiler.emitTyped(OpAssign, assignKind)
+		fc.emitTyped(OpAssign, assignKind)
 	case *AstBreakStmt:
-		if len(compiler.controlStack) == 0 {
-			compiler.fail(fmt.Errorf("compile error on line %d: break used outside loop or switch", node.Line))
+		if len(fc.controlStack) == 0 {
+			fc.fail(fmt.Errorf("compile error on line %d: break used outside loop or switch", node.Line))
 			return
 		}
-		patchPos := compiler.emitOpWithOperand(OpJump, 0)
-		frame := &compiler.controlStack[len(compiler.controlStack)-1]
+		patchPos := fc.emitOpWithOperand(OpJump, 0)
+		frame := &fc.controlStack[len(fc.controlStack)-1]
 		frame.breakPatches = append(frame.breakPatches, patchPos)
 	case *AstContinueStmt:
-		controlIndex := compiler.findContinueControlIndex()
+		controlIndex := fc.findContinueControlIndex()
 		if controlIndex < 0 {
-			compiler.fail(fmt.Errorf("compile error on line %d: continue used outside loop", node.Line))
+			fc.fail(fmt.Errorf("compile error on line %d: continue used outside loop", node.Line))
 			return
 		}
-		patchPos := compiler.emitOpWithOperand(OpJump, 0)
-		frame := &compiler.controlStack[controlIndex]
+		patchPos := fc.emitOpWithOperand(OpJump, 0)
+		frame := &fc.controlStack[controlIndex]
 		frame.continuePatches = append(frame.continuePatches, patchPos)
 	default:
-		compiler.fail(fmt.Errorf("compile error: unsupported statement type %T", stmt))
+		fc.fail(fmt.Errorf("compile error: unsupported statement type %T", stmt))
 	}
 }
 
-func (compiler *Compiler) compileLocalDecl(node *AstLocalDeclStmt) {
-	if node == nil || compiler.err != nil {
+func (fc *functionCompiler) compileLocalDecl(node *AstLocalDeclStmt) {
+	if node == nil || fc.err != nil {
 		return
 	}
-	compiler.allocateLocal(node.Name, node.Type, node.Line)
-	if compiler.err != nil || node.Initializer == nil {
+	fc.allocateLocal(node.Name, node.Type, node.Line)
+	if fc.err != nil || node.Initializer == nil {
 		return
 	}
-	compiler.compileExprAs(node.Initializer, node.Type)
+	fc.compileExprAs(node.Initializer, node.Type)
 	ident := &AstIdentNode{Name: node.Name, Line: node.Line}
-	ident.astEmitAddress(&compiler.code, compiler)
-	if compiler.err != nil {
+	ident.astEmitAddress(fc)
+	if fc.err != nil {
 		return
 	}
 	assignKind := valueKindFromType(node.Type)
 	if assignKind == KindNone {
 		assignKind = KindInt32
 	}
-	compiler.emitTyped(OpAssign, assignKind)
+	fc.emitTyped(OpAssign, assignKind)
 }
 
-func (compiler *Compiler) allocateLocal(name string, typ *Type, line int) {
+func (fc *functionCompiler) allocateLocal(name string, typ *Type, line int) {
 	if typ == nil {
-		compiler.fail(fmt.Errorf("compile error on line %d: local variable %q has invalid type", line, name))
+		fc.fail(fmt.Errorf("compile error on line %d: local variable %q has invalid type", line, name))
 		return
 	}
 	if typ.Kind == TypeVoid {
-		compiler.fail(fmt.Errorf("compile error on line %d: local variable %q cannot have type void", line, name))
+		fc.fail(fmt.Errorf("compile error on line %d: local variable %q cannot have type void", line, name))
 		return
 	}
-	if len(compiler.localScopeStack) == 0 {
-		compiler.localScopeStack = append(compiler.localScopeStack, make(map[string]struct{}))
+	if len(fc.localScopeStack) == 0 {
+		fc.localScopeStack = append(fc.localScopeStack, make(map[string]struct{}))
 	}
-	scope := compiler.localScopeStack[len(compiler.localScopeStack)-1]
+	scope := fc.localScopeStack[len(fc.localScopeStack)-1]
 	if _, exists := scope[name]; exists {
-		compiler.fail(fmt.Errorf("compile error on line %d: duplicate local declaration %q", line, name))
+		fc.fail(fmt.Errorf("compile error on line %d: duplicate local declaration %q", line, name))
 		return
 	}
-	offset := alignUpU32(compiler.currentFrameByteSize, uint32(typ.Alignment()))
-	compiler.localSlots[name] = offset
-	compiler.localTypes[name] = typ
+	offset := alignUpU32(fc.frameByteSize, uint32(typ.Alignment()))
+	fc.localSlots[name] = offset
+	fc.localTypes[name] = typ
 	scope[name] = struct{}{}
-	compiler.currentFrameByteSize = offset + uint32(typ.Size)
-	compiler.localSlotCount++
+	fc.frameByteSize = offset + uint32(typ.Size)
+	fc.localSlotCount++
 }
 
-func (compiler *Compiler) rejectConstAssignment(target AstLvalueNode, line int) bool {
+func (fc *functionCompiler) rejectConstAssignment(target AstLvalueNode, line int) bool {
 	ident, ok := target.(*AstIdentNode)
 	if !ok {
 		return false
 	}
-	if localType, exists := compiler.localTypes[ident.Name]; exists {
+	if localType, exists := fc.localTypes[ident.Name]; exists {
 		if IsTopLevelConst(localType) {
-			compiler.fail(fmt.Errorf("compile error on line %d: cannot assign to const variable %q", line, ident.Name))
+			fc.fail(fmt.Errorf("compile error on line %d: cannot assign to const variable %q", line, ident.Name))
 			return true
 		}
 		return false
 	}
-	binding, ok := compiler.symbolBindings[ident.Name]
+	binding, ok := fc.symbolBindings[ident.Name]
 	if ok && binding.Kind == DeclVariable && IsTopLevelConst(binding.Type) {
-		compiler.fail(fmt.Errorf("compile error on line %d: cannot assign to const variable %q", line, ident.Name))
+		fc.fail(fmt.Errorf("compile error on line %d: cannot assign to const variable %q", line, ident.Name))
 		return true
 	}
 	return false
@@ -1182,40 +1157,40 @@ var arithmeticOperators = map[string]ArithmeticOp{
 	"/": ArithmeticDiv,
 }
 
-func (compiler *Compiler) emitArithmetic(op string, kind ValueKind) {
+func (fc *functionCompiler) emitArithmetic(op string, kind ValueKind) {
 	if arithmeticOp, ok := arithmeticOperators[op]; ok {
-		compiler.emitInstruction(makeArithmeticInstruction(kind, arithmeticOp))
+		fc.emitInstruction(makeArithmeticInstruction(kind, arithmeticOp))
 	} else {
-		compiler.fail(fmt.Errorf("compile error: arithmetic operator %q not yet fully supported", op))
+		fc.fail(fmt.Errorf("compile error: arithmetic operator %q not yet fully supported", op))
 	}
 }
 
-func (compiler *Compiler) emitComparison(op string, kind ValueKind) {
+func (fc *functionCompiler) emitComparison(op string, kind ValueKind) {
 	if compareOp, ok := comparisonOperators[op]; ok {
-		compiler.emitInstruction(makeCompareInstruction(kind, compareOp))
+		fc.emitInstruction(makeCompareInstruction(kind, compareOp))
 	} else {
-		compiler.fail(fmt.Errorf("compile error: comparison operator %q not yet fully supported", op))
+		fc.fail(fmt.Errorf("compile error: comparison operator %q not yet fully supported", op))
 	}
 
 }
-func (compiler *Compiler) compileSwitchStmt(node *AstSwitchStmt) {
+func (fc *functionCompiler) compileSwitchStmt(node *AstSwitchStmt) {
 	if node == nil {
 		return
 	}
-	compiler.controlStack = append(compiler.controlStack, controlFrame{})
-	switchType := compiler.exprType(node.Value)
+	fc.controlStack = append(fc.controlStack, controlFrame{})
+	switchType := fc.exprType(node.Value)
 	if switchType == nil {
 		switchType = Int32Type
 	}
 	compareFailPatches := make([]int, 0, len(node.Cases))
 	caseEntryPatches := make([]int, 0, len(node.Cases))
 	for _, switchCase := range node.Cases {
-		compareStart := len(compiler.code)
+		compareStart := len(fc.code)
 		for _, patchPos := range compareFailPatches {
-			compiler.patchOperand(patchPos, compareStart)
+			fc.patchOperand(patchPos, compareStart)
 		}
 		compareFailPatches = compareFailPatches[:0]
-		caseType := promoteNumericType(switchType, compiler.exprType(switchCase.Value))
+		caseType := promoteNumericType(switchType, fc.exprType(switchCase.Value))
 		if caseType == nil {
 			caseType = switchType
 		}
@@ -1224,122 +1199,128 @@ func (compiler *Compiler) compileSwitchStmt(node *AstSwitchStmt) {
 			caseType = Int32Type
 			caseKind = KindInt32
 		}
-		compiler.compileExprAs(node.Value, caseType)
-		compiler.compileExprAs(switchCase.Value, caseType)
-		compiler.emitComparison("==", caseKind)
-		compareFailPatches = append(compareFailPatches, compiler.emitOpWithOperand(OpJumpIfFalse, 0))
-		caseEntryPatches = append(caseEntryPatches, compiler.emitOpWithOperand(OpJump, 0))
+		fc.compileExprAs(node.Value, caseType)
+		fc.compileExprAs(switchCase.Value, caseType)
+		fc.emitComparison("==", caseKind)
+		compareFailPatches = append(compareFailPatches, fc.emitOpWithOperand(OpJumpIfFalse, 0))
+		caseEntryPatches = append(caseEntryPatches, fc.emitOpWithOperand(OpJump, 0))
 	}
-	defaultJumpPos := compiler.emitOpWithOperand(OpJump, 0)
+	defaultJumpPos := fc.emitOpWithOperand(OpJump, 0)
 	for index, switchCase := range node.Cases {
-		bodyStart := len(compiler.code)
-		compiler.patchOperand(caseEntryPatches[index], bodyStart)
+		bodyStart := len(fc.code)
+		fc.patchOperand(caseEntryPatches[index], bodyStart)
 		for _, stmt := range switchCase.Body {
-			compiler.compileStmt(stmt)
+			fc.compileStmt(stmt)
 		}
 	}
-	defaultStart := len(compiler.code)
-	compiler.patchOperand(defaultJumpPos, defaultStart)
+	defaultStart := len(fc.code)
+	fc.patchOperand(defaultJumpPos, defaultStart)
 	for _, patchPos := range compareFailPatches {
-		compiler.patchOperand(patchPos, defaultStart)
+		fc.patchOperand(patchPos, defaultStart)
 	}
 	for _, stmt := range node.Default {
-		compiler.compileStmt(stmt)
+		fc.compileStmt(stmt)
 	}
-	endPos := len(compiler.code)
-	compiler.patchCurrentBreaks(endPos)
-	compiler.controlStack = compiler.controlStack[:len(compiler.controlStack)-1]
+	endPos := len(fc.code)
+	fc.patchCurrentBreaks(endPos)
+	fc.controlStack = fc.controlStack[:len(fc.controlStack)-1]
 }
 
-func (compiler *Compiler) findContinueControlIndex() int {
-	for index := len(compiler.controlStack) - 1; index >= 0; index-- {
-		if compiler.controlStack[index].allowsContinue {
+func (fc *functionCompiler) findContinueControlIndex() int {
+	for index := len(fc.controlStack) - 1; index >= 0; index-- {
+		if fc.controlStack[index].allowsContinue {
 			return index
 		}
 	}
 	return -1
 }
 
-func (compiler *Compiler) patchCurrentBreaks(target int) {
-	if len(compiler.controlStack) == 0 {
+func (fc *functionCompiler) patchCurrentBreaks(target int) {
+	if len(fc.controlStack) == 0 {
 		return
 	}
-	for _, patchPos := range compiler.controlStack[len(compiler.controlStack)-1].breakPatches {
-		compiler.patchOperand(patchPos, target)
+	for _, patchPos := range fc.controlStack[len(fc.controlStack)-1].breakPatches {
+		fc.patchOperand(patchPos, target)
 	}
 }
 
-func (compiler *Compiler) patchCurrentContinues(target int) {
-	if len(compiler.controlStack) == 0 {
+func (fc *functionCompiler) patchCurrentContinues(target int) {
+	if len(fc.controlStack) == 0 {
 		return
 	}
-	for _, patchPos := range compiler.controlStack[len(compiler.controlStack)-1].continuePatches {
-		compiler.patchOperand(patchPos, target)
+	for _, patchPos := range fc.controlStack[len(fc.controlStack)-1].continuePatches {
+		fc.patchOperand(patchPos, target)
 	}
 }
 
-func (compiler *Compiler) compileExpr(expr AstExprNode) {
-	compiler.compileExprAs(expr, compiler.exprType(expr))
+func (fc *functionCompiler) compileExpr(expr AstExprNode) {
+	fc.compileExprAs(expr, fc.exprType(expr))
 }
 
-func (node *AstIdentNode) astEmitAddress(code *CodeMemory, compiler *Compiler) {
-	if slot, ok := compiler.localSlots[node.Name]; ok {
-		code.AppendInstruction(makeAddrInstruction(segmentFrame))
-		code.AppendUint32(slot)
+func (node *AstIdentNode) astEmitAddress(fc *functionCompiler) {
+	if slot, ok := fc.localSlots[node.Name]; ok {
+		fc.code.AppendInstruction(makeAddrInstruction(segmentFrame))
+		fc.code.AppendUint32(slot)
 		return
 	}
-	binding, ok := compiler.symbolBindings[node.Name]
+	binding, ok := fc.symbolBindings[node.Name]
 	if ok && binding.Kind == DeclVariable {
 		switch binding.Scope {
 		case ScopeBSS:
-			code.AppendInstruction(makeAddrInstruction(segmentBSS))
-			code.AppendUint32(binding.ByteOffset)
+			fc.code.AppendInstruction(makeAddrInstruction(segmentBSS))
+			fc.code.AppendUint32(binding.ByteOffset)
 			return
 		case ScopeData:
-			code.AppendInstruction(makeAddrInstruction(segmentData))
-			code.AppendUint32(binding.ByteOffset)
+			fc.code.AppendInstruction(makeAddrInstruction(segmentData))
+			fc.code.AppendUint32(binding.ByteOffset)
 			return
 		case ScopeConst:
-			code.AppendInstruction(makeAddrInstruction(segmentConst))
-			code.AppendUint32(binding.ByteOffset)
+			fc.code.AppendInstruction(makeAddrInstruction(segmentConst))
+			fc.code.AppendUint32(binding.ByteOffset)
 			return
 		case ScopeExtern:
-			code.AppendInstruction(makeAddrInstruction(segmentExtern))
-			code.AppendUint32(binding.ByteOffset)
+			fc.code.AppendInstruction(makeAddrInstruction(segmentExtern))
+			fc.code.AppendUint32(binding.ByteOffset)
 			return
 		}
 	}
-	compiler.fail(fmt.Errorf("compile error on line %d: unknown variable %q", node.Line, node.Name))
+	fc.fail(fmt.Errorf("compile error on line %d: unknown variable %q", node.Line, node.Name))
 }
 
-func (compiler *Compiler) emit(op Opcode) {
-	compiler.emitInstruction(makeInstruction(op, KindNone, ModeNone, FlagNone))
+func (fc *functionCompiler) emit(op Opcode) {
+	fc.emitInstruction(makeInstruction(op, KindNone, ModeNone, FlagNone))
 }
 
-func (compiler *Compiler) emitTyped(op Opcode, kind ValueKind) {
-	compiler.emitInstruction(makeInstruction(op, kind, ModeNone, FlagNone))
+func (fc *functionCompiler) emitTyped(op Opcode, kind ValueKind) {
+	fc.emitInstruction(makeInstruction(op, kind, ModeNone, FlagNone))
 }
 
-func (compiler *Compiler) emitInstruction(instruction Instruction) {
-	compiler.code.AppendInstruction(instruction)
+func (fc *functionCompiler) emitInstruction(instruction Instruction) {
+	fc.code.AppendInstruction(instruction)
 }
 
-func (compiler *Compiler) emitOpWithOperand(op Opcode, operand uint32) int {
-	compiler.emit(op)
-	position := len(compiler.code)
-	compiler.code.AppendUint32(operand)
+func (fc *functionCompiler) emitOpWithOperand(op Opcode, operand uint32) int {
+	fc.emit(op)
+	position := len(fc.code)
+	fc.code.AppendUint32(operand)
 	if op == OpJump || op == OpJumpIfFalse {
-		compiler.jumpOperandPositions = append(compiler.jumpOperandPositions, position)
+		fc.jumpOperandPositions = append(fc.jumpOperandPositions, position)
 	}
 	return position
 }
 
-func (compiler *Compiler) patchOperand(position int, operand int) {
-	compiler.code.PatchUint32(position, uint32(operand))
+func (fc *functionCompiler) patchOperand(position int, operand int) {
+	fc.code.PatchUint32(position, uint32(operand))
 }
 
 func (compiler *Compiler) fail(err error) {
 	if compiler.err == nil {
 		compiler.err = err
+	}
+}
+
+func (fc *functionCompiler) fail(err error) {
+	if fc.err == nil {
+		fc.err = err
 	}
 }

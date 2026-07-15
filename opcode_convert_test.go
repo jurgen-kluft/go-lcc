@@ -95,8 +95,7 @@ func TestCompilerNumericConversionMatrix(t *testing.T) {
 	for _, from := range opcodeNumericKinds {
 		for _, to := range opcodeNumericKinds {
 			caseCount++
-			compiler := NewCompiler()
-			compiler.code = nil
+			compiler := &functionCompiler{}
 			compiler.emitConvertIfNeeded(from, to)
 			if compiler.err != nil {
 				t.Fatalf("numeric conversion %d -> %d failed: %v", from, to, compiler.err)
@@ -124,7 +123,7 @@ func TestCompilerRejectsAddressNumericConversions(t *testing.T) {
 		from ValueKind
 		to   ValueKind
 	}{{KindAddress, KindInt32}, {KindInt32, KindAddress}} {
-		compiler := NewCompiler()
+		compiler := &functionCompiler{}
 		compiler.emitConvertIfNeeded(test.from, test.to)
 		if compiler.err == nil {
 			t.Fatalf("compiler accepted conversion %d -> %d", test.from, test.to)

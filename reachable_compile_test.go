@@ -1,6 +1,7 @@
 package cova
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -39,11 +40,11 @@ func TestCompileRequiresScriptMain(t *testing.T) {
 
 func TestCompileAssemblesReachableBlocksInSourceOrder(t *testing.T) {
 	compiled := compileBlockSource(t, `
-int dead() { return 99; }
+int dead_leaf() { return 99; }
 int leaf() { return 3; }
+int dead_caller() { return dead_leaf(); }
 int helper() { return leaf(); }
 int script_main() { return helper(); }
-int also_dead() { return 100; }
 `)
 
 	var names []string
@@ -170,5 +171,58 @@ int script_main() { return helper(); }
 	value, status := vm.PopInt32()
 	if status != VMStatusOK || value != 12 {
 		t.Fatalf("result = %d, status = %s, want 12", value, status)
+	}
+}
+
+func TestFunctionCompilersShareStringLiteralInterning(t *testing.T) {
+	compiled := compileBlockSource(t, `
+const uint8* helper() { return "shared"; }
+const uint8* script_main() {
+	const uint8* local = "shared";
+	return helper();
+}
+`)
+	if got := bytes.Count(compiled.ConstData, []byte("shared\x00")); got != 1 {
+		t.Fatalf("shared literal count = %d, want 1", got)
+	}
+}
+
+func TestCompilerReuseAfterFunctionErrorDoesNotLeakContextState(t *testing.T) {
+	compiler := NewCompiler()
+	badTokens, err := Tokenize(`
+int script_main() { return missing(); }
+`)
+	if err != nil {
+		t.Fatalf("Tokenize bad program failed: %v", err)
+	}
+	badProgram, err := Parse(badTokens)
+	if err != nil {
+		t.Fatalf("Parse bad program failed: %v", err)
+	}
+	if _, err := compiler.Compile(badProgram); err == nil {
+		t.Fatal("expected bad function compilation to fail")
+	}
+
+	goodTokens, err := Tokenize(`
+int helper() { return 5; }
+int script_main() { return helper(); }
+`)
+	if err != nil {
+		t.Fatalf("Tokenize good program failed: %v", err)
+	}
+	goodProgram, err := Parse(goodTokens)
+	if err != nil {
+		t.Fatalf("Parse good program failed: %v", err)
+	}
+	reused, err := compiler.Compile(goodProgram)
+	if err != nil {
+		t.Fatalf("Compile with reused compiler failed: %v", err)
+	}
+	fresh, err := NewCompiler().Compile(goodProgram)
+	if err != nil {
+		t.Fatalf("Compile with fresh compiler failed: %v", err)
+	}
+	if !bytes.Equal(reused.Text, fresh.Text) || !bytes.Equal(reused.ConstData, fresh.ConstData) {
+		t.Fatal("reused compiler retained function-local state")
 	}
 }
