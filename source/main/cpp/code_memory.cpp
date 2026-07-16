@@ -3,7 +3,7 @@
 
 namespace ncore
 {
-    static void assert_code_range(const code_memory_t* memory, u32 offset, u32 size)
+    static inline void assert_code_range(const code_memory_t* memory, u32 offset, u32 size)
     {
         ASSERT(memory != nullptr);
         ASSERT(memory->m_code != nullptr || memory->m_size == 0);
