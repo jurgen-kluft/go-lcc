@@ -10,17 +10,20 @@ The language is designed for small host-integrated scripts that work with primit
 - Top-level globals
 - Typed, block-scoped local variables inside functions
 - Script functions with typed parameters and returns
-- `extern(offset)` variables backed by host memory
-- `extern(slot)` functions dispatched by the host
 - String literals passed as pointer values
-- `//` single-line comments
 - Expressions using `true`, `false`, `+`, `-`, `*`, `/`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`
 - Control flow: `if`, `if/else`, `while`, `for`, `switch`, `break`, `continue`, `return`
+- Built-ins; 
+  - `sin`, `cos`, `tan`, `asin`, `acos`, `atan` `sqrt`, `pow`
+- `//` single-line comments
+- `/* ... */` block comments
+- `extern(offset)` variables backed by host memory
+- `extern(slot)` functions dispatched by the host
 
 ## Current Limits
 
 - No local declarations in `for` initializers
-- No `/* ... */` block comments
+- No `/* ... */` block comments in expressions
 - Standalone expression statements must be function calls
 - No arrays, structs, or field access
 - No unary operators such as `-x`, `!x`, `*ptr`, or `&x`
